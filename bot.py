@@ -288,8 +288,6 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("📉 רמות"),        KeyboardButton("🗂 תפריט")],
     ],
     resize_keyboard=True,
-    persistent=True,
-    input_field_placeholder="בחר פעולה או כתוב פקודה…",
 )
 
 
