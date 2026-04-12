@@ -10,9 +10,10 @@ import os
 from datetime import datetime
 
 import pytz
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -190,6 +191,7 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         "  💰 ירידה/עלייה חדה, Gap Up/Down"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text("בחר פעולה:", reply_markup=build_menu_keyboard())
 
 
 async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -270,6 +272,105 @@ async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+#  Inline keyboard menu
+# ─────────────────────────────────────────────────────────────
+
+DEFAULT_SYMBOL = "NNE"
+
+def build_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 גרף " + DEFAULT_SYMBOL,    callback_data="chart:"    + DEFAULT_SYMBOL),
+            InlineKeyboardButton("📈 סטטוס מניות",               callback_data="status"),
+        ],
+        [
+            InlineKeyboardButton("🔍 ניתוח " + DEFAULT_SYMBOL,  callback_data="analysis:" + DEFAULT_SYMBOL),
+            InlineKeyboardButton("📉 רמות "  + DEFAULT_SYMBOL,  callback_data="levels:"   + DEFAULT_SYMBOL),
+        ],
+        [
+            InlineKeyboardButton("❓ עזרה",                      callback_data="help"),
+        ],
+    ])
+
+
+async def cmd_menu(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "בחר פעולה:",
+        reply_markup=build_menu_keyboard(),
+    )
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data == "status":
+        await query.message.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
+        data_list = get_quick_status()
+        lines = ["📊 *סטטוס מניות נוכחי*\n"]
+        for d in data_list:
+            if d["price"] is None:
+                lines.append(f"  ❌ {d['symbol']:6s} — שגיאה")
+                continue
+            chg   = d["change"]
+            rsi   = d["rsi"]
+            arrow = "🟢" if chg >= 0 else "🔴"
+            chg_s = f"{'+'if chg>=0 else ''}{chg:.1f}%"
+            rsi_s = f"RSI {rsi:.0f}" if rsi is not None else "     "
+            flag  = (" 🔥" if rsi < 30 else " ⚠️" if rsi > 70 else "") if rsi else ""
+            lines.append(f"  {arrow} {d['symbol']:6s}  ${d['price']:8.2f}  {chg_s:>7}   {rsi_s}{flag}")
+        await query.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif data.startswith("analysis:"):
+        symbol = data.split(":", 1)[1]
+        await query.message.reply_text(f"⏳ מנתח את {symbol}…")
+        await query.message.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
+
+    elif data.startswith("levels:"):
+        symbol = data.split(":", 1)[1]
+        await query.message.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
+        await query.message.reply_text(get_levels(symbol), parse_mode="Markdown")
+
+    elif data.startswith("chart:"):
+        symbol = data.split(":", 1)[1]
+        msg = await query.message.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
+        try:
+            df = _fetch_daily(symbol)
+            if df.empty or len(df) < 5:
+                await msg.edit_text(f"❌ אין מספיק נתונים עבור {symbol}")
+                return
+            supports, resistances = _find_sr(df)
+            buf = await asyncio.get_event_loop().run_in_executor(
+                None, build_chart, symbol, df, supports, resistances
+            )
+            caption = (
+                f"📈 *{symbol}* — 30 ימים אחרונים\n"
+                f"🛡️ תמיכות: {', '.join(f'${s:.2f}' for s in supports[:3]) or '—'}\n"
+                f"🔺 התנגדויות: {', '.join(f'${r:.2f}' for r in resistances[:3]) or '—'}"
+            )
+            await query.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
+            await msg.delete()
+        except Exception as exc:
+            log.error("Chart callback error %s: %s", symbol, exc)
+            await msg.edit_text(f"❌ שגיאה ביצירת גרף עבור {symbol}: {exc}")
+
+    elif data == "help":
+        await query.message.reply_text(
+            "📋 *פקודות זמינות:*\n"
+            "  /menu — תפריט כפתורים\n"
+            "  /status — מחירים נוכחיים + RSI\n"
+            "  /analysis NNE — ניתוח מלא\n"
+            "  /levels NNE — תמיכות והתנגדויות\n"
+            "  /chart NNE — גרף נרות 30 ימים\n"
+            "  /stop — השהה התראות\n"
+            "  /resume — חדש התראות",
+            parse_mode="Markdown",
+        )
+
+
+# ─────────────────────────────────────────────────────────────
 #  Main
 # ─────────────────────────────────────────────────────────────
 
@@ -290,12 +391,14 @@ def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("menu",     cmd_menu))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("analysis", cmd_analysis))
     app.add_handler(CommandHandler("levels",   cmd_levels))
     app.add_handler(CommandHandler("chart",    cmd_chart))
     app.add_handler(CommandHandler("stop",     cmd_stop))
     app.add_handler(CommandHandler("resume",   cmd_resume))
+    app.add_handler(CallbackQueryHandler(handle_callback))
 
     async def post_init(application: Application) -> None:
         asyncio.create_task(scan_loop(application))
