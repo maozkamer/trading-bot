@@ -109,34 +109,28 @@ def build_chart(
         hlines_colors.append(_RES_COLOR)
         hlines_lw.append(1.2)
 
-    hlines_cfg = dict(
-        hlines=hlines_vals,
-        colors=hlines_colors,
-        linewidths=hlines_lw,
-        linestyle="--",
-        alpha=0.75,
-    ) if hlines_vals else {}
-
     # ── Plot ─────────────────────────────────────────────────
     mc = mpf.make_marketcolors(
-        up=_UP_COLOR, down=_DOWN_COLOR,
-        edge={"up": _UP_COLOR, "down": _DOWN_COLOR},
-        wick={"up": _UP_COLOR, "down": _DOWN_COLOR},
-        volume={"up": _UP_COLOR, "down": _DOWN_COLOR},
+        up="green", down="red",
+        edge={"up": "green", "down": "red"},
+        wick={"up": "green", "down": "red"},
+        volume={"up": "green", "down": "red"},
     )
-    style = mpf.make_mpf_style(base_mpf_style="nightclouds",
-                                marketcolors=mc,
-                                facecolor="#0d1117",
-                                edgecolor="#30363d",
-                                figcolor="#0d1117",
-                                gridcolor="#21262d",
-                                gridstyle="--",
-                                y_on_right=True,
-                                rc={
-                                    "axes.labelcolor":  "#c9d1d9",
-                                    "xtick.color":      "#8b949e",
-                                    "ytick.color":      "#c9d1d9",
-                                })
+    style = mpf.make_mpf_style(
+        base_mpf_style="nightclouds",
+        marketcolors=mc,
+        facecolor="#0d1117",
+        edgecolor="#30363d",
+        figcolor="#0d1117",
+        gridcolor="#21262d",
+        gridstyle="--",
+        y_on_right=True,
+        rc={
+            "axes.labelcolor": "#c9d1d9",
+            "xtick.color":     "#8b949e",
+            "ytick.color":     "#c9d1d9",
+        },
+    )
 
     fig, axes = mpf.plot(
         df,
@@ -148,8 +142,12 @@ def build_chart(
         title=f"\n  {symbol}  —  ${price:.2f}   (30 ימים אחרונים)",
         tight_layout=True,
         returnfig=True,
-        **hlines_cfg,
     )
+
+    # ── Draw S/R lines directly on the axis (avoids mplfinance kwarg issues) ──
+    ax = axes[0]
+    for s, color, lw in zip(hlines_vals, hlines_colors, hlines_lw):
+        ax.axhline(y=s, color=color, linewidth=lw, linestyle="--", alpha=0.75)
 
     # ── Legend ───────────────────────────────────────────────
     legend_patches = []
@@ -175,13 +173,13 @@ def build_chart(
         )
 
     # S/R price labels on the right y-axis
-    ax = axes[0]
     for s in vis_sup:
         ax.annotate(f"  ${s:.2f}", xy=(1, s), xycoords=("axes fraction", "data"),
                     fontsize=7, color=_SUP_COLOR, va="center")
     for r in vis_res:
         ax.annotate(f"  ${r:.2f}", xy=(1, r), xycoords=("axes fraction", "data"),
                     fontsize=7, color=_RES_COLOR, va="center")
+
 
     # ── Encode to PNG buffer ──────────────────────────────────
     buf = io.BytesIO()
