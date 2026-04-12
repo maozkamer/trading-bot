@@ -10,9 +10,10 @@ import os
 from datetime import datetime
 
 import pytz
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -381,32 +382,72 @@ async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Persistent Reply Keyboard
+#  Keyboards
 # ─────────────────────────────────────────────────────────────
 
-# Buttons that trigger "ask for symbol" flow
-SYMBOL_ACTIONS = {"📊 גרף", "🔍 ניתוח", "📉 רמות", "📐 Fib", "⚡ VWAP", "📊 BB"}
-
-# Key stored in context.user_data while waiting for a symbol
 PENDING_KEY = "pending_action"
 
+# Persistent bottom keyboard
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("📈 סטטוס מניות"), KeyboardButton("❓ עזרה")],
-        [KeyboardButton("📊 גרף"),         KeyboardButton("🔍 ניתוח")],
-        [KeyboardButton("📉 רמות"),        KeyboardButton("🗂 תפריט")],
-        [KeyboardButton("📐 Fib"),         KeyboardButton("⚡ VWAP"),   KeyboardButton("📊 BB")],
+        [KeyboardButton("📈 סטטוס"),       KeyboardButton("🔍 סקרינר")],
+        [KeyboardButton("📊 גרף"),          KeyboardButton("📐 פיבונאצ'י")],
+        [KeyboardButton("📉 BB"),           KeyboardButton("⚡ VWAP")],
+        [KeyboardButton("🗂 עוד פקודות")],
     ],
     resize_keyboard=True,
 )
+
+# Inline symbol picker — 4 per row
+_SYMBOLS_ROWS = [
+    ["NNE",  "MARA", "PLTR", "IREN"],
+    ["SOFI", "AAPL", "NVDA", "TSLA"],
+    ["CIFR", "HOOD", "MSFT", "OKLO"],
+    ["SMR",  "RKLB", "COIN", "RIOT"],
+    ["AMD",  "META", "GOOGL","AMZN"],
+]
+
+def build_symbol_picker(action_prefix: str) -> InlineKeyboardMarkup:
+    """Returns an inline keyboard with every watchlist symbol."""
+    rows = [
+        [InlineKeyboardButton(sym, callback_data=f"{action_prefix}:{sym}") for sym in row]
+        for row in _SYMBOLS_ROWS
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def build_more_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📅 Earnings",  callback_data="more:earnings"),
+            InlineKeyboardButton("🔔 רמות",      callback_data="more:levels"),
+        ],
+        [
+            InlineKeyboardButton("📰 חדשות",     callback_data="more:news"),
+            InlineKeyboardButton("❓ עזרה",       callback_data="more:help"),
+        ],
+    ])
+
+# Reply-button labels that open the symbol picker
+SYMBOL_ACTIONS = {"📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP"}
+
+# Map reply-button label → callback prefix
+_ACTION_PREFIX = {
+    "📊 גרף":       "chart",
+    "📐 פיבונאצ'י": "fib",
+    "📉 BB":         "bb",
+    "⚡ VWAP":       "vwap",
+}
 
 
 async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
 
 
+# ─────────────────────────────────────────────────────────────
+#  Shared action executor (used by inline callbacks + commands)
+# ─────────────────────────────────────────────────────────────
+
 async def _send_status(msg) -> None:
-    """Shared status logic used by both the command and the menu button."""
     await msg.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
     data_list = get_quick_status()
     lines = ["📊 *סטטוס מניות נוכחי*\n"]
@@ -425,8 +466,8 @@ async def _send_status(msg) -> None:
 
 
 async def _run_symbol_action(action: str, symbol: str, msg) -> None:
-    """Execute chart / analysis / levels for a given symbol."""
-    if action == "📊 גרף":
+    """Execute an action (by prefix name) on a symbol."""
+    if action == "chart":
         loading = await msg.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
         try:
             df = _fetch_daily(symbol)
@@ -448,60 +489,121 @@ async def _run_symbol_action(action: str, symbol: str, msg) -> None:
             log.error("Chart error %s: %s", symbol, exc)
             await loading.edit_text(f"❌ שגיאה: {exc}")
 
-    elif action == "🔍 ניתוח":
-        await msg.reply_text(f"⏳ מנתח את {symbol}…")
-        await msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
-
-    elif action == "📉 רמות":
-        await msg.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
-        await msg.reply_text(get_levels(symbol), parse_mode="Markdown")
-
-    elif action == "📐 Fib":
+    elif action == "fib":
         await msg.reply_text(f"⏳ מחשב רמות פיבונאצ'י עבור {symbol}…")
         await msg.reply_text(get_fibonacci_levels(symbol), parse_mode="Markdown")
 
-    elif action == "⚡ VWAP":
-        await msg.reply_text(f"⏳ מחשב VWAP עבור {symbol}…")
-        await msg.reply_text(get_vwap(symbol), parse_mode="Markdown")
-
-    elif action == "📊 BB":
+    elif action == "bb":
         await msg.reply_text(f"⏳ מחשב Bollinger Bands עבור {symbol}…")
         await msg.reply_text(get_bollinger_levels(symbol), parse_mode="Markdown")
 
+    elif action == "vwap":
+        await msg.reply_text(f"⏳ מחשב VWAP עבור {symbol}…")
+        await msg.reply_text(get_vwap(symbol), parse_mode="Markdown")
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles all non-command text: menu button presses + symbol replies."""
+    elif action == "levels":
+        await msg.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
+        await msg.reply_text(get_levels(symbol), parse_mode="Markdown")
+
+    elif action == "analysis":
+        await msg.reply_text(f"⏳ מנתח את {symbol}…")
+        await msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
+
+
+# ─────────────────────────────────────────────────────────────
+#  Inline callback handler
+# ─────────────────────────────────────────────────────────────
+
+async def handle_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    prefix, _, payload = data.partition(":")
+
+    # Symbol actions triggered from the picker
+    if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis"):
+        await _run_symbol_action(prefix, payload, query.message)
+
+    # "עוד פקודות" sub-menu actions
+    elif prefix == "more":
+        if payload == "earnings":
+            await query.message.reply_text("⏳ בודק Earnings…")
+            from news import build_earnings_messages
+            msgs = await asyncio.get_event_loop().run_in_executor(
+                None, build_earnings_messages
+            )
+            if msgs:
+                for m in msgs:
+                    await query.message.reply_text(m, parse_mode="Markdown")
+            else:
+                await query.message.reply_text("אין Earnings קרובים ברשימה.")
+
+        elif payload == "levels":
+            await query.message.reply_text(
+                "בחר מנייה לרמות תמיכה/התנגדות:",
+                reply_markup=build_symbol_picker("levels"),
+            )
+
+        elif payload == "news":
+            await query.message.reply_text("⏳ מושך חדשות…")
+            from news import build_morning_message
+            msg = await asyncio.get_event_loop().run_in_executor(
+                None, build_morning_message
+            )
+            await query.message.reply_text(msg, parse_mode="Markdown")
+
+        elif payload == "help":
+            await query.message.reply_text(
+                "📋 *פקודות זמינות:*\n"
+                "  /status — מחירים נוכחיים + RSI\n"
+                "  /analysis NNE — ניתוח מלא\n"
+                "  /levels NNE — תמיכות והתנגדויות\n"
+                "  /chart NNE — גרף נרות 30 ימים\n"
+                "  /bb NNE — Bollinger Bands\n"
+                "  /fib NNE — רמות פיבונאצ'י\n"
+                "  /vwap NNE — VWAP\n"
+                "  /stop — השהה התראות\n"
+                "  /resume — חדש התראות",
+                parse_mode="Markdown",
+            )
+
+
+# ─────────────────────────────────────────────────────────────
+#  Reply-keyboard text handler
+# ─────────────────────────────────────────────────────────────
+
+async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
 
-    # ── User replied with a symbol after we asked ─────────────
-    pending = context.user_data.get(PENDING_KEY)
-    if pending and text not in SYMBOL_ACTIONS and text != "🗂 תפריט":
-        context.user_data.pop(PENDING_KEY)
-        symbol = text.upper()
-        await _run_symbol_action(pending, symbol, update.message)
-        return
-
-    # ── Menu buttons ──────────────────────────────────────────
-    if text == "📈 סטטוס מניות":
+    if text == "📈 סטטוס":
         await _send_status(update.message)
 
+    elif text == "🔍 סקרינר":
+        await update.message.reply_text("⏳ מריץ סקרינר… (עשוי לקחת זמן)")
+        from news import build_screener_message
+        msg = await asyncio.get_event_loop().run_in_executor(
+            None, build_screener_message
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
     elif text in SYMBOL_ACTIONS:
-        context.user_data[PENDING_KEY] = text
-        await update.message.reply_text("איזו מנייה? (למשל: NNE, MARA, PLTR)")
-
-    elif text == "🗂 תפריט":
-        await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
-
-    elif text == "❓ עזרה":
+        prefix = _ACTION_PREFIX[text]
+        labels = {
+            "chart": "📊 גרף",
+            "fib":   "📐 פיבונאצ'י",
+            "bb":    "📉 BB",
+            "vwap":  "⚡ VWAP",
+        }
         await update.message.reply_text(
-            "📋 *פקודות זמינות:*\n"
-            "  /status — מחירים נוכחיים + RSI\n"
-            "  /analysis NNE — ניתוח מלא\n"
-            "  /levels NNE — תמיכות והתנגדויות\n"
-            "  /chart NNE — גרף נרות 30 ימים\n"
-            "  /stop — השהה התראות\n"
-            "  /resume — חדש התראות",
-            parse_mode="Markdown",
+            f"בחר מנייה עבור {labels[prefix]}:",
+            reply_markup=build_symbol_picker(prefix),
+        )
+
+    elif text == "🗂 עוד פקודות":
+        await update.message.reply_text(
+            "בחר פעולה:",
+            reply_markup=build_more_keyboard(),
         )
 
 
@@ -536,6 +638,7 @@ def main() -> None:
     app.add_handler(CommandHandler("vwap",     cmd_vwap))
     app.add_handler(CommandHandler("stop",     cmd_stop))
     app.add_handler(CommandHandler("resume",   cmd_resume))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     async def post_init(application: Application) -> None:
