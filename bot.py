@@ -213,28 +213,28 @@ async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
         await update.message.reply_text("שלח: /analysis NNE")
         return
-    symbol = context.args[0].upper()
     await update.message.reply_text(f"⏳ מנתח את {symbol}…")
     await update.message.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
 
 
 async def cmd_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
         await update.message.reply_text("שלח: /levels NNE")
         return
-    symbol = context.args[0].upper()
     await update.message.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
     await update.message.reply_text(get_levels(symbol), parse_mode="Markdown")
 
 
 async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
         await update.message.reply_text("שלח: /chart NNE")
         return
-    symbol = context.args[0].upper()
     msg = await update.message.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
     try:
         df = _fetch_daily(symbol)
