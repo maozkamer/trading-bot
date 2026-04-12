@@ -768,3 +768,66 @@ def get_levels(symbol: str) -> str:
 
     except Exception as exc:
         return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+# ─────────────────────────────────────────────────────────────
+#  S/R proximity scan (used by bot.py every hour)
+# ─────────────────────────────────────────────────────────────
+
+SR_PROXIMITY_PCT = 2.0   # alert when within this % of a level
+
+
+def check_sr_proximity(symbol: str) -> list[Alert]:
+    """
+    Returns Alert objects for every S/R level within SR_PROXIMITY_PCT of
+    the current price.  Separate from analyze_symbol so it can use a
+    different cooldown without flooding existing alert channels.
+    """
+    alerts: list[Alert] = []
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 20:
+            return []
+        df = df.dropna(subset=["High", "Low", "Close"])
+
+        price = float(df["Close"].iloc[-1])
+        supports, resistances = _find_sr(df)
+
+        for s in supports:
+            dist_pct = (price - s) / price * 100
+            if 0 < dist_pct <= SR_PROXIMITY_PCT:
+                alerts.append(Alert(
+                    symbol=symbol,
+                    title=f"מתקרב לתמיכה ב-${s:.2f} 📊",
+                    price=price,
+                    support=s,
+                    resistance=resistances[0] if resistances else None,
+                    description=(
+                        f"המחיר נמצא {dist_pct:.1f}% מעל אזור תמיכה חזק ב-${s:.2f}"
+                    ),
+                    recommendation="שים לב — אזור כניסה פוטנציאלי",
+                    key=f"sr_prox_sup_{round(s, 1)}",
+                    cooldown_hours=4,
+                ))
+
+        for r in resistances:
+            dist_pct = (r - price) / price * 100
+            if 0 < dist_pct <= SR_PROXIMITY_PCT:
+                alerts.append(Alert(
+                    symbol=symbol,
+                    title=f"מתקרב להתנגדות ב-${r:.2f} 📊",
+                    price=price,
+                    support=supports[0] if supports else None,
+                    resistance=r,
+                    description=(
+                        f"המחיר נמצא {dist_pct:.1f}% מתחת לאזור התנגדות חזק ב-${r:.2f}"
+                    ),
+                    recommendation="שים לב — אזור יציאה / זהירות פוטנציאלי",
+                    key=f"sr_prox_res_{round(r, 1)}",
+                    cooldown_hours=4,
+                ))
+
+    except Exception as exc:
+        log.error("SR proximity error %s: %s", symbol, exc)
+
+    return alerts

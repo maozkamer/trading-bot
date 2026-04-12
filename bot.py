@@ -21,10 +21,14 @@ from analysis import (
     WATCHLIST,
     Alert,
     analyze_symbol,
+    check_sr_proximity,
     get_full_analysis,
     get_levels,
     get_quick_status,
+    _fetch_daily,
+    _find_sr,
 )
+from charts import build_chart
 from database import (
     get_setting,
     init_db,
@@ -65,6 +69,19 @@ def format_alert(alert: Alert) -> str:
     )
 
 
+def format_sr_alert(alert: Alert) -> str:
+    """Format for S/R proximity alerts (different layout)."""
+    level_type = "תמיכה" if "sup" in alert.key else "התנגדות"
+    level_price = alert.support if "sup" in alert.key else alert.resistance
+    dist_pct = abs(alert.price - level_price) / alert.price * 100 if level_price else 0
+    return (
+        f"📊 *{alert.symbol}* מתקרב ל{level_type} ב-${level_price:.2f}\n"
+        f"💵 מחיר נוכחי: ${alert.price:.2f}\n"
+        f"📉 מרחק: {dist_pct:.1f}% מה{level_type}\n"
+        f"⚡ שים לב — {alert.recommendation}"
+    )
+
+
 def is_market_hours() -> bool:
     now = datetime.now(EST_TZ)
     if now.weekday() >= 5:
@@ -92,6 +109,7 @@ async def run_scan(app: Application) -> None:
 
     for symbol in WATCHLIST:
         try:
+            # ── Technical alerts ─────────────────────────────
             for alert in analyze_symbol(symbol):
                 if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
                     continue
@@ -102,8 +120,23 @@ async def run_scan(app: Application) -> None:
                     parse_mode="Markdown",
                 )
                 sent += 1
-                await asyncio.sleep(0.4)          # flood guard
-            await asyncio.sleep(1.5)              # yfinance rate-limit
+                await asyncio.sleep(0.4)
+
+            # ── S/R proximity alerts ──────────────────────────
+            if is_market_hours():
+                for alert in check_sr_proximity(symbol):
+                    if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
+                        continue
+                    save_alert(symbol, alert.key)
+                    await app.bot.send_message(
+                        chat_id=OWNER_CHAT_ID,
+                        text=format_sr_alert(alert),
+                        parse_mode="Markdown",
+                    )
+                    sent += 1
+                    await asyncio.sleep(0.4)
+
+            await asyncio.sleep(1.5)
         except Exception as exc:
             log.error("Scan error %s: %s", symbol, exc)
 
@@ -145,6 +178,7 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         "  /status — מחירים נוכחיים + RSI\n"
         "  /analysis AAPL — ניתוח מלא\n"
         "  /levels AAPL — תמיכות והתנגדויות\n"
+        "  /chart AAPL — גרף נרות 30 ימים\n"
         "  /stop — השהה התראות\n"
         "  /resume — חדש התראות\n\n"
         "🚨 *סוגי התראות:*\n"
@@ -196,6 +230,33 @@ async def cmd_levels(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(get_levels(symbol), parse_mode="Markdown")
 
 
+async def cmd_chart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args:
+        await update.message.reply_text("❓ שימוש: /chart AAPL")
+        return
+    symbol = ctx.args[0].upper()
+    msg = await update.message.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 5:
+            await msg.edit_text(f"❌ אין מספיק נתונים עבור {symbol}")
+            return
+        supports, resistances = _find_sr(df)
+        buf = await asyncio.get_event_loop().run_in_executor(
+            None, build_chart, symbol, df, supports, resistances
+        )
+        caption = (
+            f"📈 *{symbol}* — 30 ימים אחרונים\n"
+            f"🛡️ תמיכות: {', '.join(f'${s:.2f}' for s in supports[:3]) or '—'}\n"
+            f"🔺 התנגדויות: {', '.join(f'${r:.2f}' for r in resistances[:3]) or '—'}"
+        )
+        await update.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
+        await msg.delete()
+    except Exception as exc:
+        log.error("Chart error %s: %s", symbol, exc)
+        await msg.edit_text(f"❌ שגיאה ביצירת גרף עבור {symbol}: {exc}")
+
+
 async def cmd_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     global alerts_paused
     alerts_paused = True
@@ -232,6 +293,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("analysis", cmd_analysis))
     app.add_handler(CommandHandler("levels",   cmd_levels))
+    app.add_handler(CommandHandler("chart",    cmd_chart))
     app.add_handler(CommandHandler("stop",     cmd_stop))
     app.add_handler(CommandHandler("resume",   cmd_resume))
 
