@@ -553,6 +553,35 @@ def analyze_symbol(symbol: str) -> list[Alert]:
                     "סיגנל שלילי — שקול יציאה",
                     "below_ma50", 24)
 
+        # ── SMA 150 ──────────────────────────────────────────
+        s150, s150_p = _sma(closes, 150)
+        if s150 is not None and s150_p is not None:
+            # פריצה / שבירה
+            if prev < s150_p and price > s150:
+                add("🚀 פריצה מעל MA150",
+                    f"המחיר פרץ מעל ממוצע 150 ימים (${s150:.2f})",
+                    "סיגנל עולה — כדאי לבדוק כניסה",
+                    "break_above_ma150", 8)
+            elif prev > s150_p and price < s150:
+                add("💥 שבירה מתחת ל-MA150",
+                    f"המחיר שבר מתחת לממוצע 150 ימים (${s150:.2f})",
+                    "סיגנל יורד — שקול יציאה",
+                    "break_below_ma150", 8)
+            else:
+                dist_pct = (s150 - price) / price * 100
+                # מתקרב מלמטה (מחיר מתחת ל-MA150 ומרחק <= 2%)
+                if 0 < dist_pct <= 2.0:
+                    add("📊 מתקרב ל-MA150 מלמטה",
+                        f"מחיר: ${price:.2f} | MA150: ${s150:.2f} | מרחק: {dist_pct:.1f}%",
+                        "פריצה אפשרית — עקוב מקרוב",
+                        "approach_ma150_below", 8)
+                # מתקרב מלמעלה (מחיר מעל MA150 ומרחק <= 2%)
+                elif -2.0 <= dist_pct < 0:
+                    add("📊 מתקרב ל-MA150 מלמעלה",
+                        f"מחיר: ${price:.2f} | MA150: ${s150:.2f} | מרחק: {abs(dist_pct):.1f}%",
+                        "תמיכה אפשרית — שים לב",
+                        "approach_ma150_above", 8)
+
         # ── SMA 200 + Golden/Death Cross ─────────────────────
         s200, s200_p = _sma(closes, 200)
         if s200 is not None and s200_p is not None:

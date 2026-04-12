@@ -19,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from news import build_morning_message, build_earnings_messages
 from analysis import (
     WATCHLIST,
     Alert,
@@ -157,6 +158,64 @@ async def scan_loop(app: Application) -> None:
         sleep_secs = 3600 if in_market else 14400
         log.info("Next scan in %.0f min  (market_hours=%s)", sleep_secs / 60, in_market)
         await asyncio.sleep(sleep_secs)
+
+
+def _seconds_until_time(hour: int, minute: int) -> float:
+    """Seconds until the next occurrence of HH:MM in Israel time."""
+    import pytz as _pytz
+    tz  = _pytz.timezone("Asia/Jerusalem")
+    now = datetime.now(tz)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target = target.replace(day=target.day + 1)
+    return (target - now).total_seconds()
+
+
+async def morning_news_loop(app: Application) -> None:
+    """Sends morning news digest every day at 08:00 Israel time."""
+    while True:
+        await asyncio.sleep(_seconds_until_time(8, 0))
+        if OWNER_CHAT_ID is None:
+            await asyncio.sleep(60)
+            continue
+        try:
+            msg = await asyncio.get_event_loop().run_in_executor(
+                None, build_morning_message
+            )
+            await app.bot.send_message(
+                chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
+            )
+            log.info("Morning news sent")
+        except Exception as exc:
+            log.error("morning_news_loop error: %s", exc)
+        await asyncio.sleep(61)   # avoid double-fire in the same minute
+
+
+async def earnings_loop(app: Application) -> None:
+    """Sends earnings reminders every day at 08:30 Israel time."""
+    while True:
+        await asyncio.sleep(_seconds_until_time(8, 30))
+        if OWNER_CHAT_ID is None:
+            await asyncio.sleep(60)
+            continue
+        try:
+            messages = await asyncio.get_event_loop().run_in_executor(
+                None, build_earnings_messages
+            )
+            for msg in messages:
+                symbol = msg.split("*")[1] if "*" in msg else "earnings"
+                key    = f"earnings_{symbol}_{datetime.now().strftime('%Y%m%d')}"
+                if is_alert_recent(symbol, key, 24):
+                    continue
+                save_alert(symbol, key)
+                await app.bot.send_message(
+                    chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
+                )
+                await asyncio.sleep(0.4)
+            log.info("Earnings check done — %d alerts", len(messages))
+        except Exception as exc:
+            log.error("earnings_loop error: %s", exc)
+        await asyncio.sleep(61)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -415,6 +474,8 @@ def main() -> None:
 
     async def post_init(application: Application) -> None:
         asyncio.create_task(scan_loop(application))
+        asyncio.create_task(morning_news_loop(application))
+        asyncio.create_task(earnings_loop(application))
 
     app.post_init = post_init
 
