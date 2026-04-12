@@ -152,6 +152,33 @@ def _sma(closes: pd.Series, period: int) -> tuple[float, float] | tuple[None, No
     return float(s.iloc[-1]), float(s.iloc[-2])
 
 
+def _bollinger(closes: pd.Series, period: int = 20, std_dev: int = 2):
+    """Returns (upper, middle, lower) Bollinger Band values for the last bar."""
+    middle = closes.rolling(period).mean()
+    std    = closes.rolling(period).std()
+    upper  = middle + std_dev * std
+    lower  = middle - std_dev * std
+    return float(upper.iloc[-1]), float(middle.iloc[-1]), float(lower.iloc[-1])
+
+
+def _vwap(df: pd.DataFrame):
+    """
+    Compute VWAP on the last 20 bars (current) and the 20 bars ending one bar back (prev).
+    Returns (current_vwap, prev_vwap).
+    """
+    def _calc(slice_df):
+        tp  = (slice_df["High"] + slice_df["Low"] + slice_df["Close"]) / 3
+        vol = slice_df["Volume"]
+        total_vol = vol.sum()
+        if total_vol == 0:
+            return None
+        return float((tp * vol).sum() / total_vol)
+
+    curr_vwap = _calc(df.iloc[-20:])
+    prev_vwap = _calc(df.iloc[-21:-1])
+    return curr_vwap, prev_vwap
+
+
 # ─────────────────────────────────────────────────────────────
 #  Support / Resistance
 # ─────────────────────────────────────────────────────────────
@@ -607,13 +634,70 @@ def analyze_symbol(symbol: str) -> list[Alert]:
         if len(volumes) >= 21:
             avg_vol  = float(volumes.iloc[-21:-1].mean())
             curr_vol = float(volumes.iloc[-1])
-            if avg_vol > 0 and curr_vol > avg_vol * 2:
-                pct = (price - prev) / prev * 100
-                dir_str = f"עלייה של {pct:.1f}%" if pct >= 0 else f"ירידה של {abs(pct):.1f}%"
+            if avg_vol > 0 and curr_vol > avg_vol * 3:
                 add("נפח גבוה חריג 📊",
-                    f"נפח מסחר גבוה פי {curr_vol/avg_vol:.1f} מהממוצע עם {dir_str}",
-                    "תנועה משמעותית — עקוב מקרוב",
-                    "high_volume", 6)
+                    f"נפח היום: {curr_vol/1e6:.1f}M | ממוצע: {avg_vol/1e6:.1f}M (פי {curr_vol/avg_vol:.1f})",
+                    "נפח חריג לרוב מעיד על כניסת כסף גדול או חדשות קרובות — כדאי לעקוב מקרוב",
+                    "high_volume_3x", 4)
+
+        # ── Bollinger Bands ───────────────────────────────────
+        if len(closes) >= 20:
+            bb_upper, bb_mid, bb_lower = _bollinger(closes)
+            if price > bb_upper:
+                add("📈 פריצה מעל Bollinger Band עליון",
+                    f"מחיר: ${price:.2f} | Band עליון: ${bb_upper:.2f}",
+                    "פריצה מעל הפס העליון — מומנטום חזק אבל גם overbought. בסווינג זה יכול להיות המשך עלייה או נקודת יציאה",
+                    "bb_upper_break", 6)
+            elif price < bb_lower:
+                add("📉 ירידה מתחת ל-Bollinger Band תחתון",
+                    f"מחיר: ${price:.2f} | Band תחתון: ${bb_lower:.2f}",
+                    "נגיעה בפס התחתון לרוב מעידה על oversold — הזדמנות כניסה פוטנציאלית לסווינג",
+                    "bb_lower_break", 6)
+
+        # ── Fibonacci proximity alerts ────────────────────────
+        if len(df) >= 30:
+            _fib_window = df.iloc[-30:]
+            _fib_high = float(_fib_window["High"].max())
+            _fib_low  = float(_fib_window["Low"].min())
+            _fib_range = _fib_high - _fib_low
+            if _fib_range > 0:
+                _fib_levels = [
+                    (0,    _fib_high),
+                    (23.6, _fib_high - 0.236 * _fib_range),
+                    (38.2, _fib_high - 0.382 * _fib_range),
+                    (50,   _fib_high - 0.5   * _fib_range),
+                    (61.8, _fib_high - 0.618 * _fib_range),
+                    (78.6, _fib_high - 0.786 * _fib_range),
+                    (100,  _fib_low),
+                ]
+                for pct, level in _fib_levels:
+                    if level > 0 and abs(price - level) / level <= 0.01:
+                        if pct == 61.8:
+                            _fib_rec = "רמת הזהב (Golden Ratio) — רמת היפוך חשובה מאוד. שים לב לכיוון הבא"
+                        elif price > level:
+                            _fib_rec = f"המחיר מעל רמת פיבונאצ'י {pct}% — עשוי לשמש תמיכה"
+                        else:
+                            _fib_rec = f"המחיר מתחת לרמת פיבונאצ'י {pct}% — עשוי לשמש התנגדות"
+                        add(f"📐 קרוב לרמת פיבונאצ'י {pct}%",
+                            f"מחיר: ${price:.2f} | רמה: ${level:.2f} ({pct}%)",
+                            _fib_rec,
+                            f"fib_{pct}_{round(level,1)}", 8)
+
+        # ── VWAP crossover alerts ─────────────────────────────
+        if len(df) >= 22:
+            _vwap_curr, _vwap_prev_val = _vwap(df)
+            _prev_close = float(closes.iloc[-2])
+            if _vwap_curr is not None and _vwap_prev_val is not None:
+                if _prev_close < _vwap_prev_val and price > _vwap_curr:
+                    add("⚡ חציית VWAP כלפי מעלה",
+                        f"מחיר: ${price:.2f} | VWAP: ${_vwap_curr:.2f}",
+                        "חציית VWAP כלפי מעלה — סיגנל שורי. מומנטום עולה",
+                        "vwap_cross_up", 4)
+                elif _prev_close > _vwap_prev_val and price < _vwap_curr:
+                    add("⚡ חציית VWAP כלפי מטה",
+                        f"מחיר: ${price:.2f} | VWAP: ${_vwap_curr:.2f}",
+                        "חציית VWAP כלפי מטה — סיגנל דובי. מומנטום יורד",
+                        "vwap_cross_down", 4)
 
         # ── Support / Resistance touch ────────────────────────
         for s in supports[:2]:
@@ -784,6 +868,110 @@ def get_levels(symbol: str) -> str:
 
         return "\n".join(lines)
 
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+def get_bollinger_levels(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 20:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df = df.dropna(subset=["Close"])
+        closes = df["Close"]
+        price  = float(closes.iloc[-1])
+        bb_upper, bb_mid, bb_lower = _bollinger(closes)
+        band_width_pct = (bb_upper - bb_lower) / bb_mid * 100
+        if band_width_pct < 5:
+            width_interp = "פס צר מאוד — צפוי תנועה חדה בקרוב (squeeze)"
+        elif band_width_pct < 10:
+            width_interp = "פס צר — שוק בצד, המתן לפריצה"
+        elif band_width_pct < 20:
+            width_interp = "פס בינוני — תנודתיות רגילה"
+        else:
+            width_interp = "פס רחב — תנודתיות גבוהה, זהירות"
+        return (
+            f"📊 *Bollinger Bands — {symbol}*\n"
+            f"💵 מחיר נוכחי: ${price:.2f}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"📈 Band עליון:  ${bb_upper:.2f}\n"
+            f"➖ Band אמצעי: ${bb_mid:.2f} (MA20)\n"
+            f"📉 Band תחתון: ${bb_lower:.2f}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"📌 רוחב הפס: {band_width_pct:.1f}% — {width_interp}"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+def get_fibonacci_levels(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 10:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df = df.dropna(subset=["High", "Low", "Close"])
+        window = df.iloc[-30:]
+        fib_high  = float(window["High"].max())
+        fib_low   = float(window["Low"].min())
+        fib_range = fib_high - fib_low
+        price     = float(df["Close"].iloc[-1])
+
+        pcts   = [0, 23.6, 38.2, 50, 61.8, 78.6, 100]
+        levels = [fib_high - (p / 100) * fib_range for p in pcts]
+
+        # Find which two levels price is between
+        between_low_pct  = None
+        between_high_pct = None
+        sorted_pairs = sorted(zip(levels, pcts), key=lambda x: x[0])
+        for i in range(len(sorted_pairs) - 1):
+            lvl_a, pct_a = sorted_pairs[i]
+            lvl_b, pct_b = sorted_pairs[i + 1]
+            if lvl_a <= price <= lvl_b:
+                between_low_pct  = pct_a
+                between_high_pct = pct_b
+                break
+
+        lines = [
+            f"📐 *רמות פיבונאצ'י — {symbol}*",
+            f"💵 מחיר נוכחי: ${price:.2f}",
+            f"📊 טווח: ${fib_low:.2f} — ${fib_high:.2f} (30 ימים)",
+            "━━━━━━━━━━━━━━━",
+        ]
+        for pct, level in zip(pcts, levels):
+            marker = " ◄ מחיר כאן" if (between_low_pct is not None
+                                        and pct in (between_low_pct, between_high_pct)
+                                        and abs(price - level) / max(level, 0.01) < 0.03) else ""
+            lines.append(f"  {pct:5.1f}%  ${level:.2f}{marker}")
+        lines.append("━━━━━━━━━━━━━━━")
+        if between_low_pct is not None:
+            lines.append(f"📌 המחיר בין {between_low_pct}% ל-{between_high_pct}%")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+def get_vwap(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 21:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df = df.dropna(subset=["High", "Low", "Close", "Volume"])
+        price = float(df["Close"].iloc[-1])
+        curr_vwap, _ = _vwap(df)
+        if curr_vwap is None:
+            return f"❌ לא ניתן לחשב VWAP עבור {symbol}"
+        if price > curr_vwap:
+            position = "מעל"
+            interp   = "המחיר מעל ה-VWAP — מצב שורי, הביקוש דומיננטי"
+        else:
+            position = "מתחת"
+            interp   = "המחיר מתחת ל-VWAP — מצב דובי, ההיצע דומיננטי"
+        return (
+            f"⚡ *VWAP — {symbol}*\n"
+            f"💵 מחיר נוכחי: ${price:.2f}\n"
+            f"📊 VWAP (20 ימים): ${curr_vwap:.2f}\n"
+            f"📌 המחיר {position} ל-VWAP — {interp}"
+        )
     except Exception as exc:
         return f"❌ שגיאה ב-{symbol}: {exc}"
 

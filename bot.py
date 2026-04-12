@@ -19,7 +19,7 @@ from telegram.ext import (
     filters,
 )
 
-from news import build_morning_message, build_earnings_messages
+from news import build_morning_message, build_earnings_messages, build_screener_message
 from analysis import (
     WATCHLIST,
     Alert,
@@ -28,6 +28,9 @@ from analysis import (
     get_full_analysis,
     get_levels,
     get_quick_status,
+    get_bollinger_levels,
+    get_fibonacci_levels,
+    get_vwap,
     _fetch_daily,
     _find_sr,
 )
@@ -191,6 +194,26 @@ async def morning_news_loop(app: Application) -> None:
         await asyncio.sleep(61)   # avoid double-fire in the same minute
 
 
+async def screener_loop(app: Application) -> None:
+    """Sends morning screener every day at 09:00 Israel time."""
+    while True:
+        await asyncio.sleep(_seconds_until_time(9, 0))
+        if OWNER_CHAT_ID is None:
+            await asyncio.sleep(60)
+            continue
+        try:
+            msg = await asyncio.get_event_loop().run_in_executor(
+                None, build_screener_message
+            )
+            await app.bot.send_message(
+                chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
+            )
+            log.info("Morning screener sent")
+        except Exception as exc:
+            log.error("screener_loop error: %s", exc)
+        await asyncio.sleep(61)   # avoid double-fire in the same minute
+
+
 async def earnings_loop(app: Application) -> None:
     """Sends earnings reminders every day at 08:30 Israel time."""
     while True:
@@ -318,6 +341,33 @@ async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.edit_text(f"❌ שגיאה ביצירת גרף עבור {symbol}: {exc}")
 
 
+async def cmd_bb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /bb NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב Bollinger Bands עבור {symbol}…")
+    await update.message.reply_text(get_bollinger_levels(symbol), parse_mode="Markdown")
+
+
+async def cmd_fib(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /fib NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב רמות פיבונאצ'י עבור {symbol}…")
+    await update.message.reply_text(get_fibonacci_levels(symbol), parse_mode="Markdown")
+
+
+async def cmd_vwap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /vwap NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב VWAP עבור {symbol}…")
+    await update.message.reply_text(get_vwap(symbol), parse_mode="Markdown")
+
+
 async def cmd_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     global alerts_paused
     alerts_paused = True
@@ -335,7 +385,7 @@ async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 # ─────────────────────────────────────────────────────────────
 
 # Buttons that trigger "ask for symbol" flow
-SYMBOL_ACTIONS = {"📊 גרף", "🔍 ניתוח", "📉 רמות"}
+SYMBOL_ACTIONS = {"📊 גרף", "🔍 ניתוח", "📉 רמות", "📐 Fib", "⚡ VWAP", "📊 BB"}
 
 # Key stored in context.user_data while waiting for a symbol
 PENDING_KEY = "pending_action"
@@ -345,6 +395,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("📈 סטטוס מניות"), KeyboardButton("❓ עזרה")],
         [KeyboardButton("📊 גרף"),         KeyboardButton("🔍 ניתוח")],
         [KeyboardButton("📉 רמות"),        KeyboardButton("🗂 תפריט")],
+        [KeyboardButton("📐 Fib"),         KeyboardButton("⚡ VWAP"),   KeyboardButton("📊 BB")],
     ],
     resize_keyboard=True,
 )
@@ -404,6 +455,18 @@ async def _run_symbol_action(action: str, symbol: str, msg) -> None:
     elif action == "📉 רמות":
         await msg.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
         await msg.reply_text(get_levels(symbol), parse_mode="Markdown")
+
+    elif action == "📐 Fib":
+        await msg.reply_text(f"⏳ מחשב רמות פיבונאצ'י עבור {symbol}…")
+        await msg.reply_text(get_fibonacci_levels(symbol), parse_mode="Markdown")
+
+    elif action == "⚡ VWAP":
+        await msg.reply_text(f"⏳ מחשב VWAP עבור {symbol}…")
+        await msg.reply_text(get_vwap(symbol), parse_mode="Markdown")
+
+    elif action == "📊 BB":
+        await msg.reply_text(f"⏳ מחשב Bollinger Bands עבור {symbol}…")
+        await msg.reply_text(get_bollinger_levels(symbol), parse_mode="Markdown")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -468,6 +531,9 @@ def main() -> None:
     app.add_handler(CommandHandler("analysis", cmd_analysis))
     app.add_handler(CommandHandler("levels",   cmd_levels))
     app.add_handler(CommandHandler("chart",    cmd_chart))
+    app.add_handler(CommandHandler("bb",       cmd_bb))
+    app.add_handler(CommandHandler("fib",      cmd_fib))
+    app.add_handler(CommandHandler("vwap",     cmd_vwap))
     app.add_handler(CommandHandler("stop",     cmd_stop))
     app.add_handler(CommandHandler("resume",   cmd_resume))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -476,6 +542,7 @@ def main() -> None:
         asyncio.create_task(scan_loop(application))
         asyncio.create_task(morning_news_loop(application))
         asyncio.create_task(earnings_loop(application))
+        asyncio.create_task(screener_loop(application))
 
     app.post_init = post_init
 

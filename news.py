@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 import feedparser
 import requests
 
-from analysis import WATCHLIST
+from analysis import WATCHLIST, _fetch_daily, _rsi, _find_sr
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +131,121 @@ def fetch_upcoming_earnings() -> list[dict]:
             })
 
     return results
+
+
+def build_screener_message() -> str:
+    """
+    Morning screener: iterates WATCHLIST, computes key indicators,
+    and returns a formatted Hebrew message split into 4 sections.
+    """
+    today_str = date.today().strftime("%d/%m/%Y")
+
+    breakout_candidates = []   # price within 3% below nearest resistance, volume ratio > 1.3
+    abnormal_volume     = []   # volume ratio >= 2.0
+    rsi_oversold        = []   # RSI < 35
+    rsi_overbought      = []   # RSI > 70
+
+    for symbol in WATCHLIST:
+        try:
+            df = _fetch_daily(symbol)
+            if df.empty or len(df) < 21:
+                continue
+            df = df.dropna(subset=["High", "Low", "Close", "Volume"])
+
+            closes  = df["Close"]
+            volumes = df["Volume"]
+            price   = float(closes.iloc[-1])
+
+            # Volume ratio
+            avg_20_vol = float(volumes.iloc[-21:-1].mean())
+            curr_vol   = float(volumes.iloc[-1])
+            vol_ratio  = (curr_vol / avg_20_vol) if avg_20_vol > 0 else 0.0
+
+            # RSI
+            rsi = _rsi(closes) if len(closes) >= 15 else None
+
+            # Support / Resistance
+            _, resistances = _find_sr(df)
+            nearest_res = resistances[0] if resistances else None
+
+            # Section 1 — breakout candidates
+            if nearest_res is not None:
+                dist_pct = (nearest_res - price) / nearest_res * 100
+                if 0 < dist_pct <= 3.0 and vol_ratio > 1.3:
+                    breakout_candidates.append({
+                        "symbol":   symbol,
+                        "price":    price,
+                        "res":      nearest_res,
+                        "dist_pct": dist_pct,
+                        "vol_ratio": vol_ratio,
+                    })
+
+            # Section 2 — abnormal volume
+            if vol_ratio >= 2.0:
+                abnormal_volume.append({
+                    "symbol":    symbol,
+                    "price":     price,
+                    "vol_ratio": vol_ratio,
+                    "curr_vol":  curr_vol,
+                    "avg_vol":   avg_20_vol,
+                })
+
+            # Sections 3 & 4 — RSI zones
+            if rsi is not None:
+                if rsi < 35:
+                    rsi_oversold.append({"symbol": symbol, "price": price, "rsi": rsi})
+                elif rsi > 70:
+                    rsi_overbought.append({"symbol": symbol, "price": price, "rsi": rsi})
+
+        except Exception as exc:
+            log.warning("screener error %s: %s", symbol, exc)
+
+    lines = [f"🔍 *סקרינר בוקר — {today_str}*\n"]
+
+    lines.append("🚀 *קרובים לפריצה* (מחיר עד 3% מתחת להתנגדות + נפח x1.3+)")
+    if breakout_candidates:
+        for e in sorted(breakout_candidates, key=lambda x: x["dist_pct"]):
+            lines.append(
+                f"  • *{e['symbol']}*  ${e['price']:.2f}  |  "
+                f"התנגדות: ${e['res']:.2f} ({e['dist_pct']:.1f}% מעל)  |  "
+                f"נפח: x{e['vol_ratio']:.1f}\n"
+                f"    📌 סיבה: קרוב לפריצת התנגדות עם עלייה בנפח"
+            )
+    else:
+        lines.append("  אין מניות מתאימות כרגע")
+
+    lines.append("\n📊 *נפח חריג* (נפח x2.0+ מהממוצע)")
+    if abnormal_volume:
+        for e in sorted(abnormal_volume, key=lambda x: -x["vol_ratio"]):
+            lines.append(
+                f"  • *{e['symbol']}*  ${e['price']:.2f}  |  "
+                f"נפח: {e['curr_vol']/1e6:.1f}M (x{e['vol_ratio']:.1f} ממוצע)\n"
+                f"    📌 סיבה: נפח חריג — ייתכן כסף גדול או קטליזטור"
+            )
+    else:
+        lines.append("  אין מניות עם נפח חריג")
+
+    lines.append("\n💚 *RSI באזור קנייה* (RSI < 35)")
+    if rsi_oversold:
+        for e in sorted(rsi_oversold, key=lambda x: x["rsi"]):
+            lines.append(
+                f"  • *{e['symbol']}*  ${e['price']:.2f}  |  RSI: {e['rsi']:.1f}\n"
+                f"    📌 סיבה: oversold — הזדמנות כניסה פוטנציאלית לסווינג"
+            )
+    else:
+        lines.append("  אין מניות ב-oversold")
+
+    lines.append("\n❤️ *RSI אזור מכירה* (RSI > 70)")
+    if rsi_overbought:
+        for e in sorted(rsi_overbought, key=lambda x: -x["rsi"]):
+            lines.append(
+                f"  • *{e['symbol']}*  ${e['price']:.2f}  |  RSI: {e['rsi']:.1f}\n"
+                f"    📌 סיבה: overbought — שקול יציאה חלקית או סטופ"
+            )
+    else:
+        lines.append("  אין מניות ב-overbought")
+
+    return "\n".join(lines)
 
 
 def build_earnings_messages() -> list[str]:
