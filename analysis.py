@@ -105,6 +105,7 @@ WATCHLIST = [
     "NNE", "MARA", "PLTR", "IREN", "SOFI", "AAPL", "NVDA", "TSLA",
     "CIFR", "HOOD", "MSFT", "OKLO", "SMR", "RKLB", "COIN", "RIOT",
     "AMD", "META", "GOOGL", "AMZN",
+    "BTC-USD", "ETH-USD",
 ]
 
 

@@ -10,6 +10,14 @@ from datetime import date, datetime, timedelta
 
 import feedparser
 import requests
+from deep_translator import GoogleTranslator
+
+
+def _translate(text: str) -> str:
+    try:
+        return GoogleTranslator(source="auto", target="iw").translate(text)
+    except Exception:
+        return text
 
 from analysis import WATCHLIST, _fetch_daily, _rsi, _find_sr
 
@@ -65,7 +73,7 @@ def build_morning_message() -> str:
 
     lines = ["🌅 *בוקר טוב! סיכום חדשות שוק:*\n"]
     for h in headlines[:10]:
-        lines.append(f"📰 {h}")
+        lines.append(f"📰 {_translate(h)}")
 
     if mentioned:
         lines.append(f"\n📊 *מניות שמוזכרות היום:* {', '.join(mentioned)}")

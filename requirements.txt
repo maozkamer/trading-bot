@@ -6,3 +6,4 @@ matplotlib==3.9.0
 mplfinance==0.12.10b0
 feedparser==6.0.11
 pytz==2024.1
+deep-translator==1.11.4

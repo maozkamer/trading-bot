@@ -393,6 +393,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("📈 סטטוס"),       KeyboardButton("🔍 סקרינר")],
         [KeyboardButton("📊 גרף"),          KeyboardButton("📐 פיבונאצ'י")],
         [KeyboardButton("📉 BB"),           KeyboardButton("⚡ VWAP")],
+        [KeyboardButton("₿ BTC"),           KeyboardButton("Ξ ETH")],
         [KeyboardButton("🗂 עוד פקודות")],
     ],
     resize_keyboard=True,
@@ -405,6 +406,7 @@ _SYMBOLS_ROWS = [
     ["CIFR", "HOOD", "MSFT", "OKLO"],
     ["SMR",  "RKLB", "COIN", "RIOT"],
     ["AMD",  "META", "GOOGL","AMZN"],
+    ["BTC-USD", "ETH-USD"],
 ]
 
 def build_symbol_picker(action_prefix: str) -> InlineKeyboardMarkup:
@@ -599,6 +601,12 @@ async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
             f"בחר מנייה עבור {labels[prefix]}:",
             reply_markup=build_symbol_picker(prefix),
         )
+
+    elif text == "₿ BTC":
+        await _run_symbol_action("analysis", "BTC-USD", update.message)
+
+    elif text == "Ξ ETH":
+        await _run_symbol_action("analysis", "ETH-USD", update.message)
 
     elif text == "🗂 עוד פקודות":
         await update.message.reply_text(
