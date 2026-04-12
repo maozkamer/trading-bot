@@ -1,19 +1,114 @@
 """
 Technical analysis engine for the swing-trading bot.
 All public functions return Hebrew-friendly Alert objects or formatted strings.
+Data source: Alpha Vantage (TIME_SERIES_DAILY + GLOBAL_QUOTE).
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import time
 from dataclasses import dataclass
+
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
+
+AV_KEY      = os.environ.get("ALPHA_VANTAGE_KEY")
+AV_BASE_URL = "https://www.alphavantage.co/query"
 
 log = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────
+#  Alpha Vantage helpers + in-process cache
+# ─────────────────────────────────────────────────────────────
+
+# Cache: symbol → (timestamp, DataFrame)
+# TTL = 55 minutes so we never hit the API twice in the same hourly scan.
+_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_CACHE_TTL = 55 * 60          # seconds
+_AV_DELAY  = 12               # seconds between requests (free tier ≤ 5/min)
+
+
+def _av_get(params: dict) -> dict:
+    """Single Alpha Vantage request with a short sleep to respect rate limits."""
+    if not AV_KEY:
+        raise RuntimeError("ALPHA_VANTAGE_KEY environment variable is not set")
+    params["apikey"] = AV_KEY
+    resp = requests.get(AV_BASE_URL, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if "Information" in data:
+        raise RuntimeError(f"Alpha Vantage rate-limit: {data['Information']}")
+    if "Error Message" in data:
+        raise ValueError(f"Alpha Vantage error: {data['Error Message']}")
+    return data
+
+
+def _fetch_daily(symbol: str) -> pd.DataFrame:
+    """
+    Fetch up to 100 days of OHLCV for *symbol*.
+    Returns a DataFrame with DatetimeIndex and columns:
+      Open, High, Low, Close, Volume
+    Caches results for _CACHE_TTL seconds.
+    """
+    now = time.monotonic()
+    if symbol in _CACHE:
+        ts, df = _CACHE[symbol]
+        if now - ts < _CACHE_TTL:
+            return df
+
+    time.sleep(_AV_DELAY)      # rate-limit guard
+
+    raw = _av_get({
+        "function":   "TIME_SERIES_DAILY",
+        "symbol":     symbol,
+        "outputsize": "compact",   # last 100 trading days
+        "datatype":   "json",
+    })
+
+    series = raw.get("Time Series (Daily)", {})
+    if not series:
+        raise ValueError(f"No daily data returned for {symbol}")
+
+    rows = []
+    for date_str, vals in series.items():
+        rows.append({
+            "Date":   date_str,
+            "Open":   float(vals["1. open"]),
+            "High":   float(vals["2. high"]),
+            "Low":    float(vals["3. low"]),
+            "Close":  float(vals["4. close"]),
+            "Volume": float(vals["5. volume"]),
+        })
+
+    df = (
+        pd.DataFrame(rows)
+        .assign(Date=lambda x: pd.to_datetime(x["Date"]))
+        .sort_values("Date")
+        .set_index("Date")
+        [["Open", "High", "Low", "Close", "Volume"]]
+    )
+
+    _CACHE[symbol] = (now, df)
+    return df
+
+
+def _fetch_quote(symbol: str) -> dict:
+    """Fetch latest price + change via GLOBAL_QUOTE (1 API call)."""
+    time.sleep(_AV_DELAY)
+    raw = _av_get({"function": "GLOBAL_QUOTE", "symbol": symbol})
+    q   = raw.get("Global Quote", {})
+    if not q:
+        raise ValueError(f"No quote data for {symbol}")
+    return {
+        "price":  float(q["05. price"]),
+        "change": float(q["10. change percent"].rstrip("%")),
+        "volume": float(q["06. volume"]),
+    }
 
 WATCHLIST = [
     "NNE", "MARA", "PLTR", "IREN", "SOFI", "AAPL", "NVDA", "TSLA",
@@ -406,7 +501,7 @@ def _swing(symbol: str, df: pd.DataFrame, price: float,
 def analyze_symbol(symbol: str) -> list[Alert]:
     alerts: list[Alert] = []
     try:
-        df = yf.Ticker(symbol).history(period="90d", interval="1d")
+        df = _fetch_daily(symbol)
         if df.empty or len(df) < 20:
             log.warning("Not enough data for %s", symbol)
             return []
@@ -549,7 +644,7 @@ def get_quick_status() -> list[dict]:
     results: list[dict] = []
     for symbol in WATCHLIST:
         try:
-            df = yf.Ticker(symbol).history(period="30d", interval="1d")
+            df = _fetch_daily(symbol)
             if df.empty or len(df) < 2:
                 results.append({"symbol": symbol, "price": None, "change": None, "rsi": None})
                 continue
@@ -566,7 +661,7 @@ def get_quick_status() -> list[dict]:
 
 def get_full_analysis(symbol: str) -> str:
     try:
-        df = yf.Ticker(symbol).history(period="90d", interval="1d")
+        df = _fetch_daily(symbol)
         if df.empty or len(df) < 20:
             return f"❌ אין מספיק נתונים עבור {symbol}"
         df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
@@ -643,7 +738,7 @@ def get_full_analysis(symbol: str) -> str:
 
 def get_levels(symbol: str) -> str:
     try:
-        df = yf.Ticker(symbol).history(period="90d", interval="1d")
+        df = _fetch_daily(symbol)
         if df.empty or len(df) < 20:
             return f"❌ אין מספיק נתונים עבור {symbol}"
         df = df.dropna(subset=["High", "Low", "Close"])
