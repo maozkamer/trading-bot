@@ -1,0 +1,248 @@
+"""
+Swing-trading Telegram bot — main entry point.
+Scans WATCHLIST every hour during US market hours, every 4 hours at night.
+All messages in Hebrew.
+"""
+
+import asyncio
+import logging
+import os
+from datetime import datetime
+
+import pytz
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
+
+from analysis import (
+    WATCHLIST,
+    Alert,
+    analyze_symbol,
+    get_full_analysis,
+    get_levels,
+    get_quick_status,
+)
+from database import (
+    get_setting,
+    init_db,
+    is_alert_recent,
+    save_alert,
+    save_setting,
+)
+
+# ─────────────────────────────────────────────────────────────
+#  Config
+# ─────────────────────────────────────────────────────────────
+TOKEN  = os.environ.get("TELEGRAM_TOKEN")
+EST_TZ = pytz.timezone("US/Eastern")
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+log = logging.getLogger(__name__)
+
+OWNER_CHAT_ID: int | None = None
+alerts_paused: bool = False
+
+
+# ─────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────
+
+def format_alert(alert: Alert) -> str:
+    sup = f"${alert.support:.2f}"    if alert.support    else "—"
+    res = f"${alert.resistance:.2f}" if alert.resistance else "—"
+    return (
+        f"🚨 *{alert.symbol}* — {alert.title}\n"
+        f"💵 מחיר נוכחי: ${alert.price:.2f}\n"
+        f"📊 מה קרה: {alert.description}\n"
+        f"🎯 רמות חשובות: תמיכה {sup} / התנגדות {res}\n"
+        f"⚡ המלצה: {alert.recommendation}"
+    )
+
+
+def is_market_hours() -> bool:
+    now = datetime.now(EST_TZ)
+    if now.weekday() >= 5:
+        return False
+    open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+# ─────────────────────────────────────────────────────────────
+#  Scanner
+# ─────────────────────────────────────────────────────────────
+
+async def run_scan(app: Application) -> None:
+    global OWNER_CHAT_ID
+    if OWNER_CHAT_ID is None:
+        log.info("No owner chat_id — skipping scan")
+        return
+    if alerts_paused:
+        log.info("Alerts paused — skipping scan")
+        return
+
+    log.info("Scanning %d symbols…", len(WATCHLIST))
+    sent = 0
+
+    for symbol in WATCHLIST:
+        try:
+            for alert in analyze_symbol(symbol):
+                if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
+                    continue
+                save_alert(symbol, alert.key)
+                await app.bot.send_message(
+                    chat_id=OWNER_CHAT_ID,
+                    text=format_alert(alert),
+                    parse_mode="Markdown",
+                )
+                sent += 1
+                await asyncio.sleep(0.4)          # flood guard
+            await asyncio.sleep(1.5)              # yfinance rate-limit
+        except Exception as exc:
+            log.error("Scan error %s: %s", symbol, exc)
+
+    log.info("Scan done — %d alerts sent", sent)
+
+
+async def scan_loop(app: Application) -> None:
+    await asyncio.sleep(20)          # startup grace period
+    while True:
+        try:
+            await run_scan(app)
+        except Exception as exc:
+            log.error("scan_loop error: %s", exc)
+
+        in_market  = is_market_hours()
+        sleep_secs = 3600 if in_market else 14400
+        log.info("Next scan in %.0f min  (market_hours=%s)", sleep_secs / 60, in_market)
+        await asyncio.sleep(sleep_secs)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Command handlers
+# ─────────────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    global OWNER_CHAT_ID
+    OWNER_CHAT_ID = update.effective_chat.id
+    save_setting("chat_id", str(OWNER_CHAT_ID))
+
+    symbols_str = " | ".join(WATCHLIST)
+    text = (
+        "📈 *בוט מסחר סווינג — פעיל!*\n\n"
+        f"🔍 מנטר *{len(WATCHLIST)} מניות:*\n"
+        f"`{symbols_str}`\n\n"
+        "⏰ *תדירות סריקה:*\n"
+        "  • שעות מסחר (09:30‑16:00 EST): כל שעה\n"
+        "  • לילה / סוף שבוע: כל 4 שעות\n\n"
+        "📋 *פקודות:*\n"
+        "  /status — מחירים נוכחיים + RSI\n"
+        "  /analysis AAPL — ניתוח מלא\n"
+        "  /levels AAPL — תמיכות והתנגדויות\n"
+        "  /stop — השהה התראות\n"
+        "  /resume — חדש התראות\n\n"
+        "🚨 *סוגי התראות:*\n"
+        "  📊 תמיכה / התנגדות / פריצה\n"
+        "  📈 Bull/Bear Flag, Double Top/Bottom,\n"
+        "      Head & Shoulders, Triangle, Breakout, Cup & Handle\n"
+        "  🔢 RSI, MACD, MA50/200, Golden/Death Cross, נפח\n"
+        "  🕯️ Doji, Hammer, Engulfing, Morning/Evening Star\n"
+        "  💰 ירידה/עלייה חדה, Gap Up/Down"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
+    data  = get_quick_status()
+    lines = ["📊 *סטטוס מניות נוכחי*\n"]
+
+    for d in data:
+        if d["price"] is None:
+            lines.append(f"  ❌ {d['symbol']:6s} — שגיאה")
+            continue
+        chg   = d["change"]
+        rsi   = d["rsi"]
+        arrow = "🟢" if chg >= 0 else "🔴"
+        chg_s = f"{'+'if chg>=0 else ''}{chg:.1f}%"
+        rsi_s = f"RSI {rsi:.0f}" if rsi is not None else "     "
+        flag  = (" 🔥" if rsi < 30 else " ⚠️" if rsi > 70 else "") if rsi else ""
+        lines.append(f"  {arrow} {d['symbol']:6s}  ${d['price']:8.2f}  {chg_s:>7}   {rsi_s}{flag}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_analysis(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args:
+        await update.message.reply_text("❓ שימוש: /analysis AAPL")
+        return
+    symbol = ctx.args[0].upper()
+    await update.message.reply_text(f"⏳ מנתח את {symbol}…")
+    await update.message.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
+
+
+async def cmd_levels(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ctx.args:
+        await update.message.reply_text("❓ שימוש: /levels AAPL")
+        return
+    symbol = ctx.args[0].upper()
+    await update.message.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
+    await update.message.reply_text(get_levels(symbol), parse_mode="Markdown")
+
+
+async def cmd_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    global alerts_paused
+    alerts_paused = True
+    await update.message.reply_text("⏸️ התראות הושהו. שלח /resume להמשך.")
+
+
+async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    global alerts_paused
+    alerts_paused = False
+    await update.message.reply_text("▶️ התראות חודשו!")
+
+
+# ─────────────────────────────────────────────────────────────
+#  Main
+# ─────────────────────────────────────────────────────────────
+
+def main() -> None:
+    global OWNER_CHAT_ID
+
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN לא מוגדר! הוסף אותו כ-environment variable")
+
+    init_db()
+
+    # Restore owner chat_id from previous session
+    saved = get_setting("chat_id")
+    if saved:
+        OWNER_CHAT_ID = int(saved)
+        log.info("Restored owner chat_id: %d", OWNER_CHAT_ID)
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("analysis", cmd_analysis))
+    app.add_handler(CommandHandler("levels",   cmd_levels))
+    app.add_handler(CommandHandler("stop",     cmd_stop))
+    app.add_handler(CommandHandler("resume",   cmd_resume))
+
+    async def post_init(application: Application) -> None:
+        asyncio.create_task(scan_loop(application))
+
+    app.post_init = post_init
+
+    log.info("✅ Trading bot started — watching %d symbols", len(WATCHLIST))
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
