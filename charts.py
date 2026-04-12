@@ -12,7 +12,7 @@ from typing import Optional
 import matplotlib
 matplotlib.use("Agg")   # non-interactive backend (no display required)
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+
 import mplfinance as mpf
 import pandas as pd
 import numpy as np
@@ -149,28 +149,6 @@ def build_chart(
     for s, color, lw in zip(hlines_vals, hlines_colors, hlines_lw):
         ax.axhline(y=s, color=color, linewidth=lw, linestyle="--", alpha=0.75)
 
-    # ── Legend ───────────────────────────────────────────────
-    legend_patches = []
-    if any(mpf_p.get_label() == "MA50"  for mpf_p in add_plots):
-        legend_patches.append(mpatches.Patch(color=_MA50_COLOR,  label="MA 50"))
-    if any(mpf_p.get_label() == "MA200" for mpf_p in add_plots):
-        legend_patches.append(mpatches.Patch(color=_MA200_COLOR, label="MA 200"))
-    if vis_sup:
-        legend_patches.append(mpatches.Patch(color=_SUP_COLOR, linestyle="--",
-                                              label=f"תמיכה ({len(vis_sup)})"))
-    if vis_res:
-        legend_patches.append(mpatches.Patch(color=_RES_COLOR, linestyle="--",
-                                              label=f"התנגדות ({len(vis_res)})"))
-
-    if legend_patches:
-        axes[0].legend(
-            handles=legend_patches,
-            loc="upper left",
-            fontsize=8,
-            facecolor="#161b22",
-            edgecolor="#30363d",
-            labelcolor="#c9d1d9",
-        )
 
     # S/R price labels on the right y-axis
     for s in vis_sup:
