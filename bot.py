@@ -10,12 +10,13 @@ import os
 from datetime import datetime
 
 import pytz
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from analysis import (
@@ -190,8 +191,7 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         "  🕯️ Doji, Hammer, Engulfing, Morning/Evening Star\n"
         "  💰 ירידה/עלייה חדה, Gap Up/Down"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
-    await update.message.reply_text("בחר פעולה:", reply_markup=build_menu_keyboard())
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
 
 async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -272,74 +272,58 @@ async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Inline keyboard menu
+#  Persistent Reply Keyboard
 # ─────────────────────────────────────────────────────────────
 
-DEFAULT_SYMBOL = "NNE"
+# Buttons that trigger "ask for symbol" flow
+SYMBOL_ACTIONS = {"📊 גרף", "🔍 ניתוח", "📉 רמות"}
 
-def build_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📊 גרף " + DEFAULT_SYMBOL,    callback_data="chart:"    + DEFAULT_SYMBOL),
-            InlineKeyboardButton("📈 סטטוס מניות",               callback_data="status"),
-        ],
-        [
-            InlineKeyboardButton("🔍 ניתוח " + DEFAULT_SYMBOL,  callback_data="analysis:" + DEFAULT_SYMBOL),
-            InlineKeyboardButton("📉 רמות "  + DEFAULT_SYMBOL,  callback_data="levels:"   + DEFAULT_SYMBOL),
-        ],
-        [
-            InlineKeyboardButton("❓ עזרה",                      callback_data="help"),
-        ],
-    ])
+# Key stored in context.user_data while waiting for a symbol
+PENDING_KEY = "pending_action"
 
-
-async def cmd_menu(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "בחר פעולה:",
-        reply_markup=build_menu_keyboard(),
-    )
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton("📈 סטטוס מניות"), KeyboardButton("❓ עזרה")],
+        [KeyboardButton("📊 גרף"),         KeyboardButton("🔍 ניתוח")],
+        [KeyboardButton("📉 רמות"),        KeyboardButton("🗂 תפריט")],
+    ],
+    resize_keyboard=True,
+    persistent=True,
+    input_field_placeholder="בחר פעולה או כתוב פקודה…",
+)
 
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
+async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
 
-    data = query.data
 
-    if data == "status":
-        await query.message.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
-        data_list = get_quick_status()
-        lines = ["📊 *סטטוס מניות נוכחי*\n"]
-        for d in data_list:
-            if d["price"] is None:
-                lines.append(f"  ❌ {d['symbol']:6s} — שגיאה")
-                continue
-            chg   = d["change"]
-            rsi   = d["rsi"]
-            arrow = "🟢" if chg >= 0 else "🔴"
-            chg_s = f"{'+'if chg>=0 else ''}{chg:.1f}%"
-            rsi_s = f"RSI {rsi:.0f}" if rsi is not None else "     "
-            flag  = (" 🔥" if rsi < 30 else " ⚠️" if rsi > 70 else "") if rsi else ""
-            lines.append(f"  {arrow} {d['symbol']:6s}  ${d['price']:8.2f}  {chg_s:>7}   {rsi_s}{flag}")
-        await query.message.reply_text("\n".join(lines), parse_mode="Markdown")
+async def _send_status(msg) -> None:
+    """Shared status logic used by both the command and the menu button."""
+    await msg.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
+    data_list = get_quick_status()
+    lines = ["📊 *סטטוס מניות נוכחי*\n"]
+    for d in data_list:
+        if d["price"] is None:
+            lines.append(f"  ❌ {d['symbol']:6s} — שגיאה")
+            continue
+        chg   = d["change"]
+        rsi   = d["rsi"]
+        arrow = "🟢" if chg >= 0 else "🔴"
+        chg_s = f"{'+'if chg>=0 else ''}{chg:.1f}%"
+        rsi_s = f"RSI {rsi:.0f}" if rsi is not None else "     "
+        flag  = (" 🔥" if rsi < 30 else " ⚠️" if rsi > 70 else "") if rsi else ""
+        lines.append(f"  {arrow} {d['symbol']:6s}  ${d['price']:8.2f}  {chg_s:>7}   {rsi_s}{flag}")
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
 
-    elif data.startswith("analysis:"):
-        symbol = data.split(":", 1)[1]
-        await query.message.reply_text(f"⏳ מנתח את {symbol}…")
-        await query.message.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
 
-    elif data.startswith("levels:"):
-        symbol = data.split(":", 1)[1]
-        await query.message.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
-        await query.message.reply_text(get_levels(symbol), parse_mode="Markdown")
-
-    elif data.startswith("chart:"):
-        symbol = data.split(":", 1)[1]
-        msg = await query.message.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
+async def _run_symbol_action(action: str, symbol: str, msg) -> None:
+    """Execute chart / analysis / levels for a given symbol."""
+    if action == "📊 גרף":
+        loading = await msg.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
         try:
             df = _fetch_daily(symbol)
             if df.empty or len(df) < 5:
-                await msg.edit_text(f"❌ אין מספיק נתונים עבור {symbol}")
+                await loading.edit_text(f"❌ אין מספיק נתונים עבור {symbol}")
                 return
             supports, resistances = _find_sr(df)
             buf = await asyncio.get_event_loop().run_in_executor(
@@ -350,16 +334,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"🛡️ תמיכות: {', '.join(f'${s:.2f}' for s in supports[:3]) or '—'}\n"
                 f"🔺 התנגדויות: {', '.join(f'${r:.2f}' for r in resistances[:3]) or '—'}"
             )
-            await query.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
-            await msg.delete()
+            await msg.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
+            await loading.delete()
         except Exception as exc:
-            log.error("Chart callback error %s: %s", symbol, exc)
-            await msg.edit_text(f"❌ שגיאה ביצירת גרף עבור {symbol}: {exc}")
+            log.error("Chart error %s: %s", symbol, exc)
+            await loading.edit_text(f"❌ שגיאה: {exc}")
 
-    elif data == "help":
-        await query.message.reply_text(
+    elif action == "🔍 ניתוח":
+        await msg.reply_text(f"⏳ מנתח את {symbol}…")
+        await msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
+
+    elif action == "📉 רמות":
+        await msg.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
+        await msg.reply_text(get_levels(symbol), parse_mode="Markdown")
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles all non-command text: menu button presses + symbol replies."""
+    text = (update.message.text or "").strip()
+
+    # ── User replied with a symbol after we asked ─────────────
+    pending = context.user_data.get(PENDING_KEY)
+    if pending and text not in SYMBOL_ACTIONS and text != "🗂 תפריט":
+        context.user_data.pop(PENDING_KEY)
+        symbol = text.upper()
+        await _run_symbol_action(pending, symbol, update.message)
+        return
+
+    # ── Menu buttons ──────────────────────────────────────────
+    if text == "📈 סטטוס מניות":
+        await _send_status(update.message)
+
+    elif text in SYMBOL_ACTIONS:
+        context.user_data[PENDING_KEY] = text
+        await update.message.reply_text("איזו מנייה? (למשל: NNE, MARA, PLTR)")
+
+    elif text == "🗂 תפריט":
+        await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
+
+    elif text == "❓ עזרה":
+        await update.message.reply_text(
             "📋 *פקודות זמינות:*\n"
-            "  /menu — תפריט כפתורים\n"
             "  /status — מחירים נוכחיים + RSI\n"
             "  /analysis NNE — ניתוח מלא\n"
             "  /levels NNE — תמיכות והתנגדויות\n"
@@ -398,7 +413,7 @@ def main() -> None:
     app.add_handler(CommandHandler("chart",    cmd_chart))
     app.add_handler(CommandHandler("stop",     cmd_stop))
     app.add_handler(CommandHandler("resume",   cmd_resume))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     async def post_init(application: Application) -> None:
         asyncio.create_task(scan_loop(application))
