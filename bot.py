@@ -212,29 +212,29 @@ async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def cmd_analysis(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ctx.args:
-        await update.message.reply_text("❓ שימוש: /analysis AAPL")
+async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("שלח: /analysis NNE")
         return
-    symbol = ctx.args[0].upper()
+    symbol = context.args[0].upper()
     await update.message.reply_text(f"⏳ מנתח את {symbol}…")
     await update.message.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
 
 
-async def cmd_levels(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ctx.args:
-        await update.message.reply_text("❓ שימוש: /levels AAPL")
+async def cmd_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("שלח: /levels NNE")
         return
-    symbol = ctx.args[0].upper()
+    symbol = context.args[0].upper()
     await update.message.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
     await update.message.reply_text(get_levels(symbol), parse_mode="Markdown")
 
 
-async def cmd_chart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ctx.args:
-        await update.message.reply_text("❓ שימוש: /chart AAPL")
+async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("שלח: /chart NNE")
         return
-    symbol = ctx.args[0].upper()
+    symbol = context.args[0].upper()
     msg = await update.message.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
     try:
         df = _fetch_daily(symbol)
