@@ -1,7 +1,7 @@
 """
 Technical analysis engine for the swing-trading bot.
 All public functions return Hebrew-friendly Alert objects or formatted strings.
-Data source: Financial Modeling Prep (FMP) API.
+Data source: Twelve Data API.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ import numpy as np
 import pandas as pd
 import requests
 
-FMP_KEY      = os.environ.get("FMP_KEY")
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY")
+TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-#  FMP helpers + in-process cache
+#  Twelve Data helpers + in-process cache
 # ─────────────────────────────────────────────────────────────
 
 # Cache: symbol → (timestamp, DataFrame)
@@ -35,14 +35,14 @@ _RETRY_WAIT  = 5          # seconds between retries
 
 def _fetch_daily(symbol: str) -> pd.DataFrame:
     """
-    Fetch up to 90 days of OHLCV for *symbol* via FMP.
+    Fetch 60 days of OHLCV for *symbol* via Twelve Data.
     Retries up to 3 times with a 5-second wait on failure.
     Caches results for 55 minutes.
     Returns a DataFrame with DatetimeIndex and columns:
       Open, High, Low, Close, Volume
     """
-    if not FMP_KEY:
-        raise RuntimeError("FMP_KEY environment variable is not set")
+    if not TWELVE_DATA_KEY:
+        raise RuntimeError("TWELVE_DATA_KEY environment variable is not set")
 
     now = time.monotonic()
     if symbol in _CACHE:
@@ -53,29 +53,39 @@ def _fetch_daily(symbol: str) -> pd.DataFrame:
     last_exc: Exception = RuntimeError("unknown error")
     for attempt in range(1, _RETRY_COUNT + 1):
         try:
-            url  = f"{FMP_BASE_URL}/historical-price-full/{symbol}"
-            resp = requests.get(url, params={"apikey": FMP_KEY, "timeseries": 90},
-                                timeout=30)
+            resp = requests.get(
+                TWELVE_DATA_URL,
+                params={
+                    "symbol":     symbol,
+                    "interval":   "1day",
+                    "outputsize": 60,
+                    "apikey":     TWELVE_DATA_KEY,
+                },
+                timeout=30,
+            )
             resp.raise_for_status()
             data = resp.json()
 
-            historical = data.get("historical")
-            if not historical:
-                raise ValueError(f"FMP returned no data for {symbol}")
+            if "code" in data:
+                raise ValueError(f"Twelve Data error for {symbol}: {data.get('message', data)}")
 
-            df = pd.DataFrame(historical)
-            df["date"] = pd.to_datetime(df["date"])
+            values = data.get("values")
+            if not values:
+                raise ValueError(f"Twelve Data returned no values for {symbol}")
+
+            df = pd.DataFrame(values)
+            df["datetime"] = pd.to_datetime(df["datetime"])
             df = (
-                df.rename(columns={
-                    "date":   "Date",
-                    "open":   "Open",
-                    "high":   "High",
-                    "low":    "Low",
-                    "close":  "Close",
-                    "volume": "Volume",
-                })
+                df.rename(columns={"datetime": "Date"})
                 .set_index("Date")
                 .sort_index()
+                .assign(
+                    Open=lambda x: x["open"].astype(float),
+                    High=lambda x: x["high"].astype(float),
+                    Low=lambda x: x["low"].astype(float),
+                    Close=lambda x: x["close"].astype(float),
+                    Volume=lambda x: x["volume"].astype(float),
+                )
                 [["Open", "High", "Low", "Close", "Volume"]]
             )
 
@@ -204,7 +214,6 @@ def _candles(symbol: str, df: pd.DataFrame, price: float,
 
     body1  = abs(c1 - o1)
     range1 = h1 - l1
-    body2  = abs(c2 - o2)
 
     # Doji
     if range1 > 0 and body1 / range1 < 0.1:
@@ -293,7 +302,6 @@ def _patterns(symbol: str, df: pd.DataFrame, price: float,
     win = min(30, n)
     wh  = highs[-win:]
     wl  = lows[-win:]
-    wc  = closes[-win:]
 
     peaks   = [(i, wh[i]) for i in range(2, win - 2) if wh[i] == max(wh[i-2:i+3])]
     troughs = [(i, wl[i]) for i in range(2, win - 2) if wl[i] == min(wl[i-2:i+3])]
