@@ -1,28 +1,32 @@
 """
 Technical analysis engine for the swing-trading bot.
 All public functions return Hebrew-friendly Alert objects or formatted strings.
-Data source: yfinance with retry logic.
+Data source: Financial Modeling Prep (FMP) API.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
+
+FMP_KEY      = os.environ.get("FMP_KEY")
+FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-#  yfinance helpers + in-process cache
+#  FMP helpers + in-process cache
 # ─────────────────────────────────────────────────────────────
 
 # Cache: symbol → (timestamp, DataFrame)
-# TTL = 55 minutes so we never fetch twice in the same hourly scan.
+# TTL = 55 minutes — avoid re-fetching in the same hourly scan.
 _CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
 _CACHE_TTL   = 55 * 60    # seconds
 _RETRY_COUNT = 3
@@ -31,10 +35,15 @@ _RETRY_WAIT  = 5          # seconds between retries
 
 def _fetch_daily(symbol: str) -> pd.DataFrame:
     """
-    Fetch 60 days of OHLCV for *symbol* via yfinance.
+    Fetch up to 90 days of OHLCV for *symbol* via FMP.
     Retries up to 3 times with a 5-second wait on failure.
     Caches results for 55 minutes.
+    Returns a DataFrame with DatetimeIndex and columns:
+      Open, High, Low, Close, Volume
     """
+    if not FMP_KEY:
+        raise RuntimeError("FMP_KEY environment variable is not set")
+
     now = time.monotonic()
     if symbol in _CACHE:
         ts, df = _CACHE[symbol]
@@ -44,16 +53,35 @@ def _fetch_daily(symbol: str) -> pd.DataFrame:
     last_exc: Exception = RuntimeError("unknown error")
     for attempt in range(1, _RETRY_COUNT + 1):
         try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period="60d", interval="1d", timeout=30)
-            if df.empty:
-                raise ValueError(f"yfinance returned empty data for {symbol}")
-            # Normalise index to tz-naive date
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-            df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+            url  = f"{FMP_BASE_URL}/historical-price-full/{symbol}"
+            resp = requests.get(url, params={"apikey": FMP_KEY, "timeseries": 90},
+                                timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            historical = data.get("historical")
+            if not historical:
+                raise ValueError(f"FMP returned no data for {symbol}")
+
+            df = pd.DataFrame(historical)
+            df["date"] = pd.to_datetime(df["date"])
+            df = (
+                df.rename(columns={
+                    "date":   "Date",
+                    "open":   "Open",
+                    "high":   "High",
+                    "low":    "Low",
+                    "close":  "Close",
+                    "volume": "Volume",
+                })
+                .set_index("Date")
+                .sort_index()
+                [["Open", "High", "Low", "Close", "Volume"]]
+            )
+
             _CACHE[symbol] = (time.monotonic(), df)
             return df
+
         except Exception as exc:
             last_exc = exc
             log.warning("_fetch_daily %s attempt %d/%d failed: %s",
