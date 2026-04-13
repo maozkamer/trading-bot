@@ -33,6 +33,11 @@ _RETRY_COUNT = 3
 _RETRY_WAIT  = 5          # seconds between retries
 
 
+def _api_symbol(symbol: str) -> str:
+    """Convert display symbol to Twelve Data API format (BTC-USD → BTC/USD)."""
+    return symbol.replace("-USD", "/USD") if symbol.endswith("-USD") else symbol
+
+
 def _fetch_daily(symbol: str) -> pd.DataFrame:
     """
     Fetch 60 days of OHLCV for *symbol* via Twelve Data.
@@ -56,7 +61,7 @@ def _fetch_daily(symbol: str) -> pd.DataFrame:
             resp = requests.get(
                 TWELVE_DATA_URL,
                 params={
-                    "symbol":     symbol,
+                    "symbol":     _api_symbol(symbol),
                     "interval":   "1day",
                     "outputsize": 60,
                     "apikey":     TWELVE_DATA_KEY,
