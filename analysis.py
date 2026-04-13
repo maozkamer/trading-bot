@@ -89,7 +89,7 @@ def _fetch_daily(symbol: str) -> pd.DataFrame:
                     High=lambda x: x["high"].astype(float),
                     Low=lambda x: x["low"].astype(float),
                     Close=lambda x: x["close"].astype(float),
-                    Volume=lambda x: x["volume"].astype(float),
+                    Volume=lambda x: x["volume"].astype(float) if "volume" in x.columns else 0.0,
                 )
                 [["Open", "High", "Low", "Close", "Volume"]]
             )
