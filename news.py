@@ -19,7 +19,7 @@ def _translate(text: str) -> str:
     except Exception:
         return text
 
-from analysis import WATCHLIST, _fetch_daily, _rsi, _find_sr
+from analysis import WATCHLIST, _fetch_daily, _rsi, _find_sr, fetch_fear_greed, get_top_morning_pick
 
 log = logging.getLogger(__name__)
 
@@ -66,18 +66,34 @@ def fetch_news() -> tuple[list[str], list[str]]:
 
 
 def build_morning_message() -> str:
-    headlines, mentioned = fetch_news()
+    from datetime import date as _date
+    today_str = _date.today().strftime("%d/%m/%Y")
 
-    if not headlines:
-        return "🌅 בוקר טוב! לא הצלחתי לשלוף חדשות כרגע."
+    headlines, _ = fetch_news()
 
-    lines = ["🌅 *בוקר טוב! סיכום חדשות שוק:*\n"]
-    for h in headlines[:10]:
-        lines.append(f"📰 {_translate(h)}")
+    fg   = fetch_fear_greed()
+    pick = get_top_morning_pick()
 
-    if mentioned:
-        lines.append(f"\n📊 *מניות שמוזכרות היום:* {', '.join(mentioned)}")
+    lines = [f"🌅 *בוקר טוב! סיכום שוק — {today_str}*\n"]
 
+    # Fear & Greed
+    if fg["value"] is not None:
+        lines.append(f"😱 *Fear & Greed:* {fg['value']}/100 — {fg['classification']}\n")
+
+    # Top 3 headlines in Hebrew
+    lines.append("📰 *חדשות מרכזיות:*")
+    if headlines:
+        for h in headlines[:3]:
+            lines.append(f"  - {_translate(h)}")
+    else:
+        lines.append("  לא הצלחתי לשלוף חדשות כרגע.")
+
+    # Top morning pick
+    if pick:
+        lines.append(f"\n⭐ *מנייה לעקוב היום:* {pick['symbol']}")
+        lines.append(f"  {pick['reason']}")
+
+    lines.append("\nבהצלחה במסחר! 📈")
     return "\n".join(lines)
 
 

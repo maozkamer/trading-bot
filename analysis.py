@@ -978,6 +978,360 @@ def get_vwap(symbol: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+#  Fear & Greed Index
+# ─────────────────────────────────────────────────────────────
+
+def fetch_fear_greed() -> dict:
+    """Fetch Fear & Greed index from alternative.me. Returns {value, classification}."""
+    try:
+        resp = requests.get("https://api.alternative.me/fng/", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "value":          int(data["data"][0]["value"]),
+            "classification": data["data"][0]["value_classification"],
+        }
+    except Exception as exc:
+        log.warning("Fear & Greed fetch error: %s", exc)
+        return {"value": None, "classification": None}
+
+
+def build_fear_greed_message() -> str:
+    fg = fetch_fear_greed()
+    if fg["value"] is None:
+        return "❌ לא הצלחתי לשלוף את Fear & Greed Index"
+    value = fg["value"]
+    if value <= 25:
+        current = "שוק בפאניקה — הזדמנות קנייה היסטורית"
+    elif value <= 45:
+        current = "זהירות — אבל אפשר לחפש כניסות"
+    elif value <= 55:
+        current = "אין כיוון ברור"
+    elif value <= 75:
+        current = "השוק אופטימי — היזהר מקניות"
+    else:
+        current = "שוק מוגזם — שקול מכירה"
+    return (
+        "😱 *Fear & Greed Index*\n\n"
+        f"מדד היום: *{value}/100*\n"
+        f"מצב: *{fg['classification']}*\n\n"
+        "📌 *משמעות לסווינג:*\n"
+        "  - Extreme Fear (0‑25): שוק בפאניקה — הזדמנות קנייה היסטורית\n"
+        "  - Fear (25‑45): זהירות — אבל אפשר לחפש כניסות\n"
+        "  - Neutral (45‑55): אין כיוון ברור\n"
+        "  - Greed (55‑75): השוק אופטימי — היזהר מקניות\n"
+        "  - Extreme Greed (75‑100): שוק מוגזם — שקול מכירה\n\n"
+        f"📍 *כרגע:* {current}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+#  Active setups (chart patterns with entry / target / stop)
+# ─────────────────────────────────────────────────────────────
+
+def get_active_setups(symbol: str) -> list[dict]:
+    """
+    Returns active chart pattern setups as dicts:
+    {name, status, entry, target, stop, reason, price, vol_ratio}
+    """
+    result: list[dict] = []
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 13:
+            return []
+        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+        closes  = df["Close"].values.astype(float)
+        highs   = df["High"].values.astype(float)
+        lows    = df["Low"].values.astype(float)
+        volumes = df["Volume"].values.astype(float)
+        price   = float(closes[-1])
+        n       = len(closes)
+
+        avg_vol   = float(np.mean(volumes[-21:-1])) if n >= 21 else float(np.mean(volumes[:-1]))
+        curr_vol  = float(volumes[-1])
+        vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 0.0
+
+        def _add(name: str, status: str, entry: float, target: float,
+                 stop: float, reason: str) -> None:
+            result.append({
+                "name":      name,
+                "status":    status,
+                "entry":     entry,
+                "target":    target,
+                "stop":      stop,
+                "reason":    reason,
+                "price":     price,
+                "vol_ratio": vol_ratio,
+            })
+
+        # ── Bull Flag ────────────────────────────────────────
+        if n >= 13:
+            pole_gain = (closes[-7] - closes[-13]) / closes[-13]
+            flag_move = (closes[-1] - closes[-7]) / closes[-7]
+            if pole_gain > 0.12 and -0.08 < flag_move < 0.02:
+                flag_high = float(max(closes[-7:]))
+                flag_low  = float(min(closes[-7:]))
+                pole_move = closes[-7] - closes[-13]
+                _add("Bull Flag 🚀",
+                     "קרוב לפריצה" if flag_move > -0.02 else "בהתפתחות",
+                     flag_high * 1.005,
+                     flag_high + pole_move * 0.8,
+                     flag_low  * 0.990,
+                     f"עמוד עלייה של {pole_gain*100:.1f}% ואיחוד צדדי")
+
+        # ── Bear Flag ────────────────────────────────────────
+        if n >= 13:
+            pole_drop = (closes[-13] - closes[-7]) / closes[-13]
+            flag_move = (closes[-1] - closes[-7]) / closes[-7]
+            if pole_drop > 0.12 and -0.02 < flag_move < 0.08:
+                flag_high = float(max(closes[-7:]))
+                flag_low  = float(min(closes[-7:]))
+                pole_move = closes[-13] - closes[-7]
+                _add("Bear Flag 🐻",
+                     "קרוב לשבירה" if flag_move < 0.02 else "בהתפתחות",
+                     flag_low  * 0.995,
+                     flag_low  - pole_move * 0.8,
+                     flag_high * 1.010,
+                     f"עמוד ירידה של {pole_drop*100:.1f}%")
+
+        # ── Ascending Triangle ───────────────────────────────
+        if n >= 15:
+            rh = highs[-15:]
+            rl = lows[-15:]
+            x  = np.arange(15, dtype=float)
+            if (max(rh) - min(rh)) / max(rh) < 0.03 and float(np.polyfit(x, rl, 1)[0]) > 0:
+                breakout = float(max(rh))
+                height   = breakout - float(min(rl))
+                _add("Ascending Triangle ▲",
+                     "משולש עולה",
+                     breakout * 1.005,
+                     breakout + height,
+                     float(min(rl[-5:])) * 0.990,
+                     "התנגדות שטוחה עם תמיכה עולה")
+
+        # ── Descending Triangle ──────────────────────────────
+        if n >= 15:
+            rh = highs[-15:]
+            rl = lows[-15:]
+            x  = np.arange(15, dtype=float)
+            if (max(rl) - min(rl)) / max(rl) < 0.03 and float(np.polyfit(x, rh, 1)[0]) < 0:
+                support = float(min(rl))
+                height  = float(max(rh)) - support
+                _add("Descending Triangle ▽",
+                     "משולש יורד",
+                     support * 0.995,
+                     support - height,
+                     float(max(rh[-5:])) * 1.010,
+                     "תמיכה שטוחה עם התנגדות יורדת")
+
+        # ── Cup and Handle ───────────────────────────────────
+        if n >= 25:
+            cup     = closes[-25:-5]
+            mid_idx = len(cup) // 2
+            left    = float(cup[0])
+            bot     = float(min(cup))
+            right   = float(cup[-1])
+            handle  = closes[-5:]
+            depth   = (max(left, right) - bot) / max(left, right)
+            if (depth > 0.08
+                    and abs(left - right) / max(left, right) < 0.05
+                    and float(bot) == float(cup[mid_idx - 1: mid_idx + 2].min())
+                    and float(max(handle)) < right * 1.03
+                    and float(min(handle)) > bot * 1.02
+                    and price > right * 0.99):
+                _add("Cup and Handle ☕",
+                     "פריצה" if price > right * 1.005 else "בהתפתחות",
+                     right * 1.005,
+                     right + (right - bot),
+                     float(min(handle)) * 0.990,
+                     f"עומק כוס {depth*100:.1f}%")
+
+        # ── Breakout from consolidation ──────────────────────
+        if n >= 10:
+            consol       = closes[-9:-1]
+            consol_range = (float(max(consol)) - float(min(consol))) / float(closes[-9])
+            if consol_range < 0.05:
+                height = float(max(consol)) - float(min(consol))
+                if price > float(max(consol)) and vol_ratio > 1.5:
+                    _add("Breakout מאיחוד 🚀",
+                         "פריצה",
+                         price,
+                         price + height * 2,
+                         float(max(consol)) * 0.990,
+                         f"פריצה מאיחוד ({consol_range*100:.1f}%) עם נפח x{vol_ratio:.1f}")
+                elif price < float(min(consol)) and vol_ratio > 1.5:
+                    _add("שבירה מאיחוד 📉",
+                         "שבירה",
+                         price,
+                         price - height * 2,
+                         float(min(consol)) * 1.010,
+                         f"שבירה מאיחוד ({consol_range*100:.1f}%) עם נפח x{vol_ratio:.1f}")
+
+    except Exception as exc:
+        log.warning("get_active_setups error %s: %s", symbol, exc)
+    return result
+
+
+def build_setups_message(symbol: str) -> str:
+    setups = get_active_setups(symbol)
+    if not setups:
+        return f"🎯 *סט-אפים פעילים — {symbol}*\n\nאין סט-אפים פעילים כרגע."
+    lines = [f"🎯 *סט-אפים פעילים — {symbol}*\n"]
+    for s in setups:
+        lines.append(f"📊 *{s['name']}*")
+        lines.append(f"  מצב: {s['status']}")
+        lines.append(f"  כניסה אפשרית: ${s['entry']:.2f}")
+        lines.append(f"  יעד: ${s['target']:.2f}")
+        lines.append(f"  סטופ: ${s['stop']:.2f}")
+        lines.append(f"  📌 {s['reason']}\n")
+    return "\n".join(lines)
+
+
+def get_top_morning_pick() -> dict | None:
+    """Quick scan — best breakout candidate for the morning message."""
+    best:       dict | None = None
+    best_score: float = 0.0
+    for symbol in WATCHLIST:
+        try:
+            df = _fetch_daily(symbol)
+            if df.empty or len(df) < 21:
+                continue
+            closes   = df["Close"]
+            volumes  = df["Volume"]
+            price    = float(closes.iloc[-1])
+            avg_vol  = float(volumes.iloc[-21:-1].mean())
+            curr_vol = float(volumes.iloc[-1])
+            vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 0.0
+            _, resistances = _find_sr(df)
+            if not resistances:
+                continue
+            nearest_res = resistances[0]
+            dist_pct    = (nearest_res - price) / nearest_res * 100
+            if 0 < dist_pct <= 5 and vol_ratio > 1.1:
+                score = (5 - dist_pct) * vol_ratio
+                if score > best_score:
+                    best_score = score
+                    best = {
+                        "symbol": symbol,
+                        "reason": (
+                            f"קרוב לפריצת התנגדות ${nearest_res:.2f} "
+                            f"({dist_pct:.1f}% מעל), נפח x{vol_ratio:.1f}"
+                        ),
+                    }
+        except Exception:
+            continue
+    return best
+
+
+# ─────────────────────────────────────────────────────────────
+#  Rich analysis (detailed new format)
+# ─────────────────────────────────────────────────────────────
+
+def get_rich_analysis(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 20:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+        closes  = df["Close"]
+        price   = float(closes.iloc[-1])
+        chg     = (price - float(closes.iloc[-2])) / float(closes.iloc[-2]) * 100
+        chg_s   = f"{'+'if chg>=0 else ''}{chg:.2f}%"
+
+        supports, resistances = _find_sr(df)
+        rsi  = _rsi(closes) if len(closes) >= 15 else None
+        s50,  _ = _sma(closes, 50)
+        s150, _ = _sma(closes, 150)
+        s200, _ = _sma(closes, 200)
+
+        macd_v = sig_v = hist_v = None
+        if len(closes) >= 30:
+            macd_v, sig_v, hist_v, _ = _macd(closes)
+
+        bb_upper = bb_lower = None
+        if len(closes) >= 20:
+            bb_upper, _, bb_lower = _bollinger(closes)
+
+        vwap_val = None
+        if len(df) >= 21:
+            vwap_val, _ = _vwap(df)
+
+        fib_618 = None
+        if len(df) >= 30:
+            w  = df.iloc[-30:]
+            fh = float(w["High"].max())
+            fl = float(w["Low"].min())
+            fib_618 = fh - 0.618 * (fh - fl)
+
+        lines = [
+            f"🔍 *ניתוח מלא — {symbol}*\n",
+            f"💵 מחיר: ${price:.2f} | שינוי יום: {chg_s}\n",
+            "📊 *אינדיקטורים:*",
+        ]
+
+        if rsi is not None:
+            rsi_zone = "oversold 🟢" if rsi < 30 else ("overbought 🔴" if rsi > 70 else "neutral ⚪")
+            lines.append(f"  - RSI: {rsi:.1f} [{rsi_zone}]")
+
+        if macd_v is not None:
+            lines.append(f"  - MACD: {'חיובי 🟢' if hist_v > 0 else 'שלילי 🔴'} ({macd_v:.3f})")
+
+        ma_parts = []
+        if s50:  ma_parts.append(f"MA50: ${s50:.2f}")
+        if s150: ma_parts.append(f"MA150: ${s150:.2f}")
+        if s200: ma_parts.append(f"MA200: ${s200:.2f}")
+        if ma_parts:
+            lines.append(f"  - {' | '.join(ma_parts)}")
+
+        if bb_upper and bb_lower:
+            if price > bb_upper:   bb_st = "מעל הפס העליון 🔴"
+            elif price < bb_lower: bb_st = "מתחת לפס התחתון 🟢"
+            else:                  bb_st = "בתוך הפסים ⚪"
+            lines.append(f"  - Bollinger: {bb_st}")
+
+        lines.append("\n📐 *רמות מפתח:*")
+        lines.append(f"  - תמיכה: {', '.join(f'${s:.2f}' for s in supports[:2]) or '—'}")
+        lines.append(f"  - התנגדות: {', '.join(f'${r:.2f}' for r in resistances[:2]) or '—'}")
+        if vwap_val:
+            lines.append(f"  - VWAP: ${vwap_val:.2f}")
+        if fib_618:
+            lines.append(f"  - Fib 61.8%: ${fib_618:.2f}")
+
+        setups = get_active_setups(symbol)
+        lines.append("\n🎯 *סט-אפים פעילים:*")
+        if setups:
+            for s in setups[:3]:
+                lines.append(f"  - {s['name']} ({s['status']})")
+        else:
+            lines.append("  אין סט-אפים פעילים")
+
+        bull = bear = 0
+        if rsi is not None:
+            if rsi < 35:   bull += 2
+            elif rsi > 65: bear += 1
+        if macd_v is not None:
+            if hist_v > 0: bull += 1
+            else:          bear += 1
+        if s50:  bull += 1 if price > s50  else 0; bear += 0 if price > s50  else 1
+        if s200: bull += 1 if price > s200 else 0; bear += 0 if price > s200 else 1
+
+        if bull > bear + 1:
+            summary = f"bullish — {bull} סיגנלים חיוביים 📈"
+        elif bear > bull + 1:
+            summary = f"bearish — {bear} סיגנלים שליליים 📉"
+        else:
+            summary = "neutral — אין כיוון ברור ⚖️"
+
+        lines.append(f"\n⚡ *סיכום:* {summary}")
+        return "\n".join(lines)
+
+    except Exception as exc:
+        return f"❌ שגיאה בניתוח {symbol}: {exc}"
+
+
+# ─────────────────────────────────────────────────────────────
 #  S/R proximity scan (used by bot.py every hour)
 # ─────────────────────────────────────────────────────────────
 

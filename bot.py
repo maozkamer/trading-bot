@@ -27,11 +27,15 @@ from analysis import (
     analyze_symbol,
     check_sr_proximity,
     get_full_analysis,
+    get_rich_analysis,
     get_levels,
     get_quick_status,
     get_bollinger_levels,
     get_fibonacci_levels,
     get_vwap,
+    build_fear_greed_message,
+    build_setups_message,
+    get_active_setups,
     _fetch_daily,
     _find_sr,
 )
@@ -164,6 +168,18 @@ async def scan_loop(app: Application) -> None:
         await asyncio.sleep(sleep_secs)
 
 
+def _seconds_until_utc(hour: int, minute: int) -> float:
+    """Seconds until the next occurrence of HH:MM UTC."""
+    import pytz as _pytz
+    tz  = _pytz.utc
+    now = datetime.now(tz)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        from datetime import timedelta
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
 def _seconds_until_time(hour: int, minute: int) -> float:
     """Seconds until the next occurrence of HH:MM in Israel time."""
     import pytz as _pytz
@@ -171,25 +187,30 @@ def _seconds_until_time(hour: int, minute: int) -> float:
     now = datetime.now(tz)
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
-        target = target.replace(day=target.day + 1)
+        from datetime import timedelta
+        target += timedelta(days=1)
     return (target - now).total_seconds()
 
 
 async def morning_news_loop(app: Application) -> None:
-    """Sends morning news digest every day at 08:00 Israel time."""
+    """Sends morning news digest every day at 06:00 UTC (= 09:00 Israel time)."""
     while True:
-        await asyncio.sleep(_seconds_until_time(8, 0))
+        secs = _seconds_until_utc(6, 0)
+        log.info("Morning news scheduled in %.0f min", secs / 60)
+        await asyncio.sleep(secs)
         if OWNER_CHAT_ID is None:
+            log.warning("morning_news_loop: no chat_id yet — waiting 60s")
             await asyncio.sleep(60)
             continue
         try:
+            log.info("שולח חדשות בוקר...")
             msg = await asyncio.get_event_loop().run_in_executor(
                 None, build_morning_message
             )
             await app.bot.send_message(
                 chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
             )
-            log.info("Morning news sent")
+            log.info("Morning news sent successfully")
         except Exception as exc:
             log.error("morning_news_loop error: %s", exc)
         await asyncio.sleep(61)   # avoid double-fire in the same minute
@@ -240,6 +261,50 @@ async def earnings_loop(app: Application) -> None:
         except Exception as exc:
             log.error("earnings_loop error: %s", exc)
         await asyncio.sleep(61)
+
+
+async def setup_scan_loop(app: Application) -> None:
+    """Scans for active setups every hour during market hours, sends alerts."""
+    await asyncio.sleep(30)   # startup grace
+    while True:
+        try:
+            if OWNER_CHAT_ID is not None and not alerts_paused and is_market_hours():
+                log.info("Scanning setups for %d symbols…", len(WATCHLIST))
+                sent = 0
+                for symbol in WATCHLIST:
+                    try:
+                        setups = await asyncio.get_event_loop().run_in_executor(
+                            None, get_active_setups, symbol
+                        )
+                        for s in setups:
+                            key = f"setup_{symbol}_{s['name'].split()[0].lower()}"
+                            if is_alert_recent(symbol, key, 12):
+                                continue
+                            save_alert(symbol, key)
+                            dist_pct = (s["entry"] - s["price"]) / s["price"] * 100
+                            vol_note = f"גבוה x{s['vol_ratio']:.1f} — מחזק את הסט-אפ ⚡" if s["vol_ratio"] >= 1.5 else "תקין"
+                            text = (
+                                f"🚨 *סט-אפ מזוהה — {symbol}!*\n\n"
+                                f"📊 פטרן: {s['name']}\n"
+                                f"💵 מחיר נוכחי: ${s['price']:.2f}\n"
+                                f"🎯 נקודת פריצה: ${s['entry']:.2f} ({dist_pct:+.1f}%)\n"
+                                f"📈 יעד אחרי פריצה: ${s['target']:.2f}\n"
+                                f"🛑 סטופ מומלץ: ${s['stop']:.2f}\n"
+                                f"📊 נפח: {vol_note}\n\n"
+                                f"📌 סיבה: {s['reason']}"
+                            )
+                            await app.bot.send_message(
+                                chat_id=OWNER_CHAT_ID, text=text, parse_mode="Markdown"
+                            )
+                            sent += 1
+                            await asyncio.sleep(0.4)
+                        await asyncio.sleep(1.0)
+                    except Exception as exc:
+                        log.warning("setup_scan error %s: %s", symbol, exc)
+                log.info("Setup scan done — %d alerts sent", sent)
+        except Exception as exc:
+            log.error("setup_scan_loop error: %s", exc)
+        await asyncio.sleep(3600)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -390,11 +455,11 @@ PENDING_KEY = "pending_action"
 # Persistent bottom keyboard
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("📈 סטטוס"),       KeyboardButton("🔍 סקרינר")],
-        [KeyboardButton("📊 גרף"),          KeyboardButton("📐 פיבונאצ'י")],
-        [KeyboardButton("📉 BB"),           KeyboardButton("⚡ VWAP")],
-        [KeyboardButton("₿ BTC"),           KeyboardButton("Ξ ETH")],
-        [KeyboardButton("🗂 עוד פקודות")],
+        [KeyboardButton("📈 סטטוס"),        KeyboardButton("🔍 סקרינר")],
+        [KeyboardButton("📊 גרף"),           KeyboardButton("🎯 סט-אפים")],
+        [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
+        [KeyboardButton("📐 פיבונאצ'י"),    KeyboardButton("🔎 ניתוח")],
+        [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
     ],
     resize_keyboard=True,
 )
@@ -430,7 +495,7 @@ def build_more_keyboard() -> InlineKeyboardMarkup:
     ])
 
 # Reply-button labels that open the symbol picker
-SYMBOL_ACTIONS = {"📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP"}
+SYMBOL_ACTIONS = {"📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🎯 סט-אפים", "🔎 ניתוח"}
 
 # Map reply-button label → callback prefix
 _ACTION_PREFIX = {
@@ -438,6 +503,8 @@ _ACTION_PREFIX = {
     "📐 פיבונאצ'י": "fib",
     "📉 BB":         "bb",
     "⚡ VWAP":       "vwap",
+    "🎯 סט-אפים":   "setups",
+    "🔎 ניתוח":     "richanalysis",
 }
 
 
@@ -511,6 +578,20 @@ async def _run_symbol_action(action: str, symbol: str, msg) -> None:
         await msg.reply_text(f"⏳ מנתח את {symbol}…")
         await msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
 
+    elif action == "setups":
+        await msg.reply_text(f"⏳ מחפש סט-אפים עבור {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, build_setups_message, symbol
+        )
+        await msg.reply_text(result, parse_mode="Markdown")
+
+    elif action == "richanalysis":
+        await msg.reply_text(f"⏳ מנתח את {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, get_rich_analysis, symbol
+        )
+        await msg.reply_text(result, parse_mode="Markdown")
+
 
 # ─────────────────────────────────────────────────────────────
 #  Inline callback handler
@@ -524,7 +605,8 @@ async def handle_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     prefix, _, payload = data.partition(":")
 
     # Symbol actions triggered from the picker
-    if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis"):
+    if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis",
+                  "setups", "richanalysis"):
         await _run_symbol_action(prefix, payload, query.message)
 
     # "עוד פקודות" sub-menu actions
@@ -592,21 +674,24 @@ async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     elif text in SYMBOL_ACTIONS:
         prefix = _ACTION_PREFIX[text]
         labels = {
-            "chart": "📊 גרף",
-            "fib":   "📐 פיבונאצ'י",
-            "bb":    "📉 BB",
-            "vwap":  "⚡ VWAP",
+            "chart":        "📊 גרף",
+            "fib":          "📐 פיבונאצ'י",
+            "bb":           "📉 BB",
+            "vwap":         "⚡ VWAP",
+            "setups":       "🎯 סט-אפים",
+            "richanalysis": "🔎 ניתוח",
         }
         await update.message.reply_text(
             f"בחר מנייה עבור {labels[prefix]}:",
             reply_markup=build_symbol_picker(prefix),
         )
 
-    elif text == "₿ BTC":
-        await _run_symbol_action("analysis", "BTC-USD", update.message)
-
-    elif text == "Ξ ETH":
-        await _run_symbol_action("analysis", "ETH-USD", update.message)
+    elif text == "😱 Fear & Greed":
+        await update.message.reply_text("⏳ מושך Fear & Greed Index…")
+        msg = await asyncio.get_event_loop().run_in_executor(
+            None, build_fear_greed_message
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
     elif text == "🗂 עוד פקודות":
         await update.message.reply_text(
@@ -654,6 +739,7 @@ def main() -> None:
         asyncio.create_task(morning_news_loop(application))
         asyncio.create_task(earnings_loop(application))
         asyncio.create_task(screener_loop(application))
+        asyncio.create_task(setup_scan_loop(application))
 
     app.post_init = post_init
 
