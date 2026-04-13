@@ -896,6 +896,28 @@ def get_bollinger_levels(symbol: str) -> str:
             width_interp = "פס בינוני — תנודתיות רגילה"
         else:
             width_interp = "פס רחב — תנודתיות גבוהה, זהירות"
+        # Recommendation
+        dist_to_lower = (price - bb_lower) / bb_mid * 100
+        dist_to_upper = (bb_upper - price) / bb_mid * 100
+
+        if dist_to_lower <= 2.0:
+            rec = (
+                "💡 *המלצה:*\n"
+                f"✅ סיגנל קנייה — מחיר ב-oversold, שקול כניסה לונג\n"
+                f"🎯 כניסה: ${price:.2f} | סטופ: מתחת ל-${bb_lower * 0.99:.2f} | יעד: ${bb_mid:.2f} (פס אמצעי)"
+            )
+        elif dist_to_upper <= 2.0:
+            rec = (
+                "💡 *המלצה:*\n"
+                f"🔴 סיגנל מכירה — מחיר ב-overbought, שקול יציאה\n"
+                f"🎯 יציאה: ${price:.2f} | יעד למטה: ${bb_mid:.2f} (פס אמצעי)"
+            )
+        else:
+            rec = (
+                "💡 *המלצה:*\n"
+                "⚪ ניטרלי — המתן לנגיעה בפס עליון או תחתון"
+            )
+
         return (
             f"📊 *Bollinger Bands — {symbol}*\n"
             f"💵 מחיר נוכחי: ${price:.2f}\n"
@@ -904,7 +926,8 @@ def get_bollinger_levels(symbol: str) -> str:
             f"➖ Band אמצעי: ${bb_mid:.2f} (MA20)\n"
             f"📉 Band תחתון: ${bb_lower:.2f}\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"📌 רוחב הפס: {band_width_pct:.1f}% — {width_interp}"
+            f"📌 רוחב הפס: {band_width_pct:.1f}% — {width_interp}\n\n"
+            f"{rec}"
         )
     except Exception as exc:
         return f"❌ שגיאה ב-{symbol}: {exc}"
@@ -966,17 +989,39 @@ def get_vwap(symbol: str) -> str:
         curr_vwap, _ = _vwap(df)
         if curr_vwap is None:
             return f"❌ לא ניתן לחשב VWAP עבור {symbol}"
-        if price > curr_vwap:
+        dist_pct = abs(price - curr_vwap) / curr_vwap * 100
+
+        if dist_pct <= 0.5:
+            position = "צמוד ל"
+            interp   = "המחיר על ה-VWAP — ממתין לפריצה"
+            rec = (
+                "💡 *המלצה:*\n"
+                f"⚠️ מחיר על VWAP — המתן לפריצה ברורה לכיוון אחד"
+            )
+        elif price > curr_vwap:
             position = "מעל"
             interp   = "המחיר מעל ה-VWAP — מצב שורי, הביקוש דומיננטי"
+            target   = price + (price - curr_vwap)
+            rec = (
+                "💡 *המלצה:*\n"
+                f"✅ סיגנל קנייה — קונים בשליטה\n"
+                f"🎯 כניסה: ${price:.2f} | סטופ: מתחת ל-VWAP (${curr_vwap:.2f}) | יעד: ${target:.2f}"
+            )
         else:
             position = "מתחת"
             interp   = "המחיר מתחת ל-VWAP — מצב דובי, ההיצע דומיננטי"
+            rec = (
+                "💡 *המלצה:*\n"
+                f"🔴 סיגנל מכירה — מוכרים בשליטה\n"
+                f"🎯 הימנע מקניות | חכה לחזרה מעל VWAP (${curr_vwap:.2f})"
+            )
+
         return (
             f"⚡ *VWAP — {symbol}*\n"
             f"💵 מחיר נוכחי: ${price:.2f}\n"
             f"📊 VWAP (20 ימים): ${curr_vwap:.2f}\n"
-            f"📌 המחיר {position} ל-VWAP — {interp}"
+            f"📌 המחיר {position} VWAP — {interp}\n\n"
+            f"{rec}"
         )
     except Exception as exc:
         return f"❌ שגיאה ב-{symbol}: {exc}"
