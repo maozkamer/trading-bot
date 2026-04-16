@@ -38,20 +38,22 @@ def _api_symbol(symbol: str) -> str:
     return symbol.replace("-USD", "/USD") if symbol.endswith("-USD") else symbol
 
 
-def _fetch_daily(symbol: str) -> pd.DataFrame:
+def _fetch_daily(symbol: str, outputsize: int = 60) -> pd.DataFrame:
     """
-    Fetch 60 days of OHLCV for *symbol* via Twelve Data.
+    Fetch OHLCV data for *symbol* via Twelve Data.
+    outputsize: number of bars to fetch (default 60; use 120 for Ichimoku).
     Retries up to 3 times with a 5-second wait on failure.
-    Caches results for 55 minutes.
+    Caches results for 55 minutes (keyed by symbol + outputsize).
     Returns a DataFrame with DatetimeIndex and columns:
       Open, High, Low, Close, Volume
     """
     if not TWELVE_DATA_KEY:
         raise RuntimeError("TWELVE_DATA_KEY environment variable is not set")
 
+    _ck = f"{symbol}:{outputsize}"
     now = time.monotonic()
-    if symbol in _CACHE:
-        ts, df = _CACHE[symbol]
+    if _ck in _CACHE:
+        ts, df = _CACHE[_ck]
         if now - ts < _CACHE_TTL:
             return df
 
@@ -63,7 +65,7 @@ def _fetch_daily(symbol: str) -> pd.DataFrame:
                 params={
                     "symbol":     _api_symbol(symbol),
                     "interval":   "1day",
-                    "outputsize": 60,
+                    "outputsize": outputsize,
                     "apikey":     TWELVE_DATA_KEY,
                 },
                 timeout=30,
@@ -94,7 +96,7 @@ def _fetch_daily(symbol: str) -> pd.DataFrame:
                 [["Open", "High", "Low", "Close", "Volume"]]
             )
 
-            _CACHE[symbol] = (time.monotonic(), df)
+            _CACHE[_ck] = (time.monotonic(), df)
             return df
 
         except Exception as exc:
@@ -183,6 +185,142 @@ def _vwap(df: pd.DataFrame):
     curr_vwap = _calc(df.iloc[-20:])
     prev_vwap = _calc(df.iloc[-21:-1])
     return curr_vwap, prev_vwap
+
+
+# ─────────────────────────────────────────────────────────────
+#  Ichimoku Cloud
+# ─────────────────────────────────────────────────────────────
+
+def _ichimoku(df: pd.DataFrame) -> dict | None:
+    """
+    Calculate Ichimoku Cloud components.
+    Requires at least 78 bars (52 + 26 for shifted Senkou Span B).
+    Returns a dict with tenkan, kijun, senkou_a, senkou_b, cloud_top,
+    cloud_bottom, position ('above'/'below'/'inside'), price.
+    """
+    if len(df) < 78:
+        return None
+    highs  = df["High"]
+    lows   = df["Low"]
+    closes = df["Close"]
+
+    tenkan  = (highs.rolling(9).max()  + lows.rolling(9).min())  / 2
+    kijun   = (highs.rolling(26).max() + lows.rolling(26).min()) / 2
+    span_a  = ((tenkan + kijun) / 2).shift(26)
+    span_b  = ((highs.rolling(52).max() + lows.rolling(52).min()) / 2).shift(26)
+
+    curr_a = float(span_a.iloc[-1])
+    curr_b = float(span_b.iloc[-1])
+    if pd.isna(curr_a) or pd.isna(curr_b):
+        return None
+
+    price        = float(closes.iloc[-1])
+    cloud_top    = max(curr_a, curr_b)
+    cloud_bottom = min(curr_a, curr_b)
+
+    if price > cloud_top:
+        position = "above"
+    elif price < cloud_bottom:
+        position = "below"
+    else:
+        position = "inside"
+
+    return {
+        "tenkan":       float(tenkan.iloc[-1]),
+        "kijun":        float(kijun.iloc[-1]),
+        "senkou_a":     curr_a,
+        "senkou_b":     curr_b,
+        "cloud_top":    cloud_top,
+        "cloud_bottom": cloud_bottom,
+        "position":     position,
+        "price":        price,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+#  Stochastic RSI
+# ─────────────────────────────────────────────────────────────
+
+def _stoch_rsi(closes: pd.Series,
+               rsi_period: int = 14,
+               k_period: int = 3,
+               d_period: int = 3) -> tuple[float, float, float, float] | tuple[None, None, None, None]:
+    """
+    Returns (k_curr, d_curr, k_prev, d_prev) as 0-100 values.
+    Returns (None, None, None, None) if insufficient data.
+    """
+    if len(closes) < rsi_period + k_period + d_period + 10:
+        return None, None, None, None
+
+    delta    = closes.diff()
+    gain     = delta.clip(lower=0)
+    loss     = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / rsi_period, min_periods=rsi_period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / rsi_period, min_periods=rsi_period, adjust=False).mean()
+    rs       = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_s    = 100 - 100 / (1 + rs)
+
+    min_rsi = rsi_s.rolling(rsi_period).min()
+    max_rsi = rsi_s.rolling(rsi_period).max()
+    stoch   = (rsi_s - min_rsi) / (max_rsi - min_rsi).replace(0, np.nan) * 100
+
+    k = stoch.rolling(k_period).mean()
+    d = k.rolling(d_period).mean()
+
+    k_curr, d_curr = float(k.iloc[-1]), float(d.iloc[-1])
+    k_prev, d_prev = float(k.iloc[-2]), float(d.iloc[-2])
+
+    if any(pd.isna(v) for v in [k_curr, d_curr, k_prev, d_prev]):
+        return None, None, None, None
+    return k_curr, d_curr, k_prev, d_prev
+
+
+# ─────────────────────────────────────────────────────────────
+#  Pivot Points
+# ─────────────────────────────────────────────────────────────
+
+def _pivot_points(high: float, low: float, close: float) -> dict:
+    """Calculate daily Pivot Points from previous bar's H/L/C."""
+    pp = (high + low + close) / 3
+    r1 = 2 * pp - low
+    r2 = pp + (high - low)
+    r3 = high + 2 * (pp - low)
+    s1 = 2 * pp - high
+    s2 = pp - (high - low)
+    s3 = low - 2 * (high - pp)
+    return {"pp": pp, "r1": r1, "r2": r2, "r3": r3, "s1": s1, "s2": s2, "s3": s3}
+
+
+# ─────────────────────────────────────────────────────────────
+#  OBV (On Balance Volume)
+# ─────────────────────────────────────────────────────────────
+
+def _obv_series(df: pd.DataFrame) -> pd.Series:
+    """Compute cumulative OBV series from df."""
+    closes  = df["Close"]
+    volumes = df["Volume"]
+    direction = closes.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    return (direction * volumes).cumsum()
+
+
+# ─────────────────────────────────────────────────────────────
+#  ATR (Average True Range)
+# ─────────────────────────────────────────────────────────────
+
+def _atr(df: pd.DataFrame, period: int = 14) -> float | None:
+    """Returns current ATR value using EWM smoothing."""
+    if len(df) < period + 1:
+        return None
+    high       = df["High"]
+    low        = df["Low"]
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    val = float(tr.ewm(span=period, adjust=False).mean().iloc[-1])
+    return val if not pd.isna(val) else None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -730,6 +868,85 @@ def analyze_symbol(symbol: str) -> list[Alert]:
                         "שקול יציאה חלקית או הגדרת סטופ",
                         f"res_touch_{round(r, 1)}", 12)
                 break
+
+        # ── Ichimoku Cloud crossover ──────────────────────────
+        try:
+            df_ext = _fetch_daily(symbol, outputsize=120)
+            if len(df_ext) >= 79:
+                df_ext = df_ext.dropna(subset=["High", "Low", "Close"])
+                ich_curr = _ichimoku(df_ext)
+                ich_prev = _ichimoku(df_ext.iloc[:-1])
+                if ich_curr and ich_prev:
+                    was_below = float(df_ext["Close"].iloc[-2]) < ich_prev["cloud_bottom"]
+                    was_above = float(df_ext["Close"].iloc[-2]) > ich_prev["cloud_top"]
+                    if was_below and ich_curr["position"] == "above":
+                        add("☁️ פריצה מעל Ichimoku Cloud!",
+                            f"המחיר פרץ מעל הענן (${ich_curr['cloud_bottom']:.2f}–${ich_curr['cloud_top']:.2f})",
+                            "קנייה — המגמה עולה, הענן תומך מלמטה",
+                            "ichimoku_break_above", 4)
+                    elif was_above and ich_curr["position"] == "below":
+                        add("☁️ שבירה מתחת ל-Ichimoku Cloud!",
+                            f"המחיר שבר מתחת לענן (${ich_curr['cloud_bottom']:.2f}–${ich_curr['cloud_top']:.2f})",
+                            "הימנע מקניות — המגמה יורדת",
+                            "ichimoku_break_below", 4)
+        except Exception as _exc:
+            log.debug("Ichimoku alert skip %s: %s", symbol, _exc)
+
+        # ── Stochastic RSI crossover in extreme zones ─────────
+        if len(closes) >= 35:
+            k_c, d_c, k_p, d_p = _stoch_rsi(closes)
+            if None not in (k_c, d_c, k_p, d_p):
+                if k_p < d_p and k_c > d_c and k_c < 20:
+                    add("📉 Stochastic RSI — קנייה",
+                        f"%K ({k_c:.1f}) חצה מעל %D ({d_c:.1f}) באזור oversold",
+                        "סיגנל היפוך עולה — שקול כניסה לונג",
+                        "stochrsi_bull_cross", 4)
+                elif k_p > d_p and k_c < d_c and k_c > 80:
+                    add("📉 Stochastic RSI — מכירה",
+                        f"%K ({k_c:.1f}) חצה מתחת ל-%D ({d_c:.1f}) באזור overbought",
+                        "סיגנל היפוך יורד — שקול יציאה",
+                        "stochrsi_bear_cross", 4)
+
+        # ── Pivot Point proximity (0.5%) ──────────────────────
+        if len(df) >= 2:
+            _prev_row = df.iloc[-2]
+            _pivots   = _pivot_points(
+                float(_prev_row["High"]), float(_prev_row["Low"]), float(_prev_row["Close"])
+            )
+            for _lname, _lval in [
+                ("PP", _pivots["pp"]), ("S1", _pivots["s1"]),
+                ("S2", _pivots["s2"]), ("R1", _pivots["r1"]), ("R2", _pivots["r2"]),
+            ]:
+                if _lval > 0 and abs(price - _lval) / _lval <= 0.005:
+                    if _lname.startswith("S"):
+                        _rec = f"אזור תמיכה {_lname} — כניסה פוטנציאלית לונג"
+                    elif _lname.startswith("R"):
+                        _rec = f"אזור התנגדות {_lname} — יציאה אפשרית"
+                    else:
+                        _rec = "מחיר על Pivot Point — עקוב אחרי הכיוון הבא"
+                    add(f"📐 Pivot {_lname} ב-${_lval:.2f}",
+                        f"מחיר: ${price:.2f} | {_lname}: ${_lval:.2f} (מרחק {abs(price - _lval) / _lval * 100:.2f}%)",
+                        _rec,
+                        f"pivot_{_lname.lower()}_{round(_lval, 1)}", 4)
+                    break
+
+        # ── OBV Divergence ────────────────────────────────────
+        if len(df) >= 10:
+            _obv   = _obv_series(df)
+            _p5    = float(closes.iloc[-5])
+            _obv5  = float(_obv.iloc[-5])
+            _p_up  = price > _p5
+            _obv_up = float(_obv.iloc[-1]) > _obv5
+            if _obv_up and not _p_up:
+                add("💹 OBV Bullish Divergence",
+                    "OBV עולה בזמן שמחיר יורד — כסף חכם קונה בשקט",
+                    "שקול כניסה לונג — מוסדות נכנסים",
+                    "obv_bull_div", 4)
+            elif not _obv_up and _p_up:
+                add("💹 OBV Bearish Divergence",
+                    "OBV יורד בזמן שמחיר עולה — כסף חכם יוצא",
+                    "שקול יציאה — מוסדות מוכרים לקהל הרחב",
+                    "obv_bear_div", 4)
 
         # ── Candlestick + Chart patterns + Swing ─────────────
         alerts.extend(_candles(symbol, df, price, sup, res))
@@ -1442,3 +1659,265 @@ def check_sr_proximity(symbol: str) -> list[Alert]:
         log.error("SR proximity error %s: %s", symbol, exc)
 
     return alerts
+
+
+# ─────────────────────────────────────────────────────────────
+#  Ichimoku Cloud — formatted output
+# ─────────────────────────────────────────────────────────────
+
+def get_ichimoku(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol, outputsize=120)
+        if df.empty or len(df) < 78:
+            return f"❌ אין מספיק נתונים עבור {symbol} (נדרשים לפחות 78 ימי מסחר)"
+        df = df.dropna(subset=["High", "Low", "Close"])
+
+        ich = _ichimoku(df)
+        if ich is None:
+            return f"❌ לא ניתן לחשב Ichimoku עבור {symbol}"
+
+        price     = ich["price"]
+        cloud_top = ich["cloud_top"]
+        cloud_bot = ich["cloud_bottom"]
+
+        if ich["position"] == "above":
+            status = "מחיר מעל הענן ☀️"
+            rec    = "קנייה — המגמה עולה, הענן תומך מלמטה"
+        elif ich["position"] == "below":
+            status = "מחיר מתחת לענן 🌧️"
+            rec    = "הימנע מקניות — המגמה יורדת"
+        else:
+            status = "מחיר בתוך הענן ⛅"
+            rec    = "המתן לפריצה ברורה לכיוון אחד"
+
+        return (
+            f"☁️ *Ichimoku Cloud — {symbol}*\n"
+            f"💵 מחיר: ${price:.2f}\n"
+            f"☁️ ענן: ${cloud_bot:.2f} — ${cloud_top:.2f}\n"
+            f"📌 Tenkan-sen (9): ${ich['tenkan']:.2f}\n"
+            f"📌 Kijun-sen (26): ${ich['kijun']:.2f}\n"
+            f"📌 מצב: {status}\n\n"
+            "🔍 *סיבה:* הענן מייצג אזור תמיכה/התנגדות עבה. "
+            "מחיר מעל הענן = מגמה עולה חזקה. מתחת = מגמה יורדת. בתוך = חוסר כיוון.\n\n"
+            f"⚡ *המלצה:* {rec}"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+# ─────────────────────────────────────────────────────────────
+#  Stochastic RSI — formatted output
+# ─────────────────────────────────────────────────────────────
+
+def get_stoch_rsi(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 35:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df     = df.dropna(subset=["Close"])
+        closes = df["Close"]
+        price  = float(closes.iloc[-1])
+
+        k_c, d_c, k_p, d_p = _stoch_rsi(closes)
+        if k_c is None:
+            return f"❌ לא ניתן לחשב Stochastic RSI עבור {symbol}"
+
+        if k_c < 20:
+            status = "Oversold 🟢"
+        elif k_c > 80:
+            status = "Overbought 🔴"
+        else:
+            status = "Neutral ⚪"
+
+        if k_p < d_p and k_c > d_c and k_c < 20:
+            rec = "קנייה — %K חצה %D מעלה מתחת ל-20 (סיגנל היפוך עולה)"
+        elif k_p > d_p and k_c < d_c and k_c > 80:
+            rec = "מכירה — %K חצה %D מטה מעל 80 (סיגנל היפוך יורד)"
+        elif k_c < 20:
+            rec = "Oversold — המתן לחציית %K מעל %D לאישור קנייה"
+        elif k_c > 80:
+            rec = "Overbought — המתן לחציית %K מתחת ל-%D לאישור מכירה"
+        else:
+            rec = "המתן לאזור קיצוני (מתחת ל-20 או מעל 80)"
+
+        return (
+            f"📉 *Stochastic RSI — {symbol}*\n"
+            f"💵 מחיר: ${price:.2f}\n"
+            f"%K: {k_c:.1f} | %D: {d_c:.1f}\n"
+            f"📌 מצב: {status}\n\n"
+            "🔍 *סיבה:* Stochastic RSI מדויק יותר מ-RSI רגיל כי הוא מודד את ה-RSI "
+            "ביחס לטווח שלו. מתחת ל-20 = oversold קיצוני. מעל 80 = overbought קיצוני. "
+            "חציית %K את %D היא סיגנל כניסה/יציאה.\n\n"
+            f"⚡ *המלצה:* {rec}"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+# ─────────────────────────────────────────────────────────────
+#  Pivot Points — formatted output
+# ─────────────────────────────────────────────────────────────
+
+def get_pivot_points(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 2:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df         = df.dropna(subset=["High", "Low", "Close"])
+        prev       = df.iloc[-2]
+        curr_price = float(df["Close"].iloc[-1])
+
+        pv = _pivot_points(float(prev["High"]), float(prev["Low"]), float(prev["Close"]))
+        pp = pv["pp"]
+
+        # Find nearest level within 0.5%
+        near = [
+            name for name, val in [
+                ("S1", pv["s1"]), ("S2", pv["s2"]),
+                ("R1", pv["r1"]), ("R2", pv["r2"]), ("PP", pp)
+            ] if val > 0 and abs(curr_price - val) / val <= 0.005
+        ]
+
+        if any(n in ("S1", "S2") for n in near):
+            rec = "אזור כניסה פוטנציאלי לונג — מחיר ליד תמיכה"
+        elif any(n in ("R1", "R2") for n in near):
+            rec = "אזור יציאה או שורט — מחיר ליד התנגדות"
+        elif curr_price > pp:
+            rec = "מגמה יומית עולה — מחיר מעל Pivot Point"
+        else:
+            rec = "מגמה יומית יורדת — מחיר מתחת ל-Pivot Point"
+
+        return (
+            f"📐 *Pivot Points — {symbol}*\n"
+            f"💵 מחיר נוכחי: ${curr_price:.2f}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🔴 R3: ${pv['r3']:.2f}\n"
+            f"🔴 R2: ${pv['r2']:.2f}\n"
+            f"🔴 R1: ${pv['r1']:.2f}\n"
+            f"⚪ PP: ${pp:.2f}\n"
+            f"🟢 S1: ${pv['s1']:.2f}\n"
+            f"🟢 S2: ${pv['s2']:.2f}\n"
+            f"🟢 S3: ${pv['s3']:.2f}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            "🔍 *סיבה:* Pivot Points הן רמות שמוסדות פיננסיים וטריידרים מקצועיים עוקבים "
+            "אחריהן מדי יום. הן מחושבות מה-High/Low/Close של אתמול ומייצגות אזורי היפוך "
+            "פוטנציאליים.\n\n"
+            f"⚡ *המלצה:* {rec}"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+# ─────────────────────────────────────────────────────────────
+#  OBV — formatted output
+# ─────────────────────────────────────────────────────────────
+
+def get_obv(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 10:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df = df.dropna(subset=["Close", "Volume"])
+
+        obv        = _obv_series(df)
+        price_now  = float(df["Close"].iloc[-1])
+        price_prev = float(df["Close"].iloc[-5])
+        obv_now    = float(obv.iloc[-1])
+        obv_prev   = float(obv.iloc[-5])
+
+        price_up = price_now > price_prev
+        obv_up   = obv_now   > obv_prev
+
+        price_trend = "עולה 📈" if price_up else "יורד 📉"
+        obv_trend   = "עולה 📈" if obv_up   else ("יורד 📉" if not obv_up else "סטגנציה ➡️")
+
+        if obv_up and not price_up:
+            rec = "⚠️ כסף חכם נכנס — שקול כניסה לונג"
+        elif not obv_up and price_up:
+            rec = "⚠️ כסף חכם יוצא — שקול יציאה"
+        else:
+            rec = "המגמה מאושרת — המשך לפי הכיוון"
+
+        return (
+            f"💹 *OBV — {symbol}*\n"
+            f"📊 OBV: {obv_trend}\n"
+            f"💵 מחיר: {price_trend} (${price_prev:.2f} → ${price_now:.2f})\n\n"
+            "🔍 *סיבה:* OBV עוקב אחרי כסף חכם. כשOBV עולה בזמן שמחיר יורד — מוסדות קונים "
+            "בשקט. כשOBV יורד בזמן שמחיר עולה — מוסדות מוכרים לקהל הרחב.\n\n"
+            f"⚡ *המלצה:* {rec}"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+# ─────────────────────────────────────────────────────────────
+#  ATR — formatted output
+# ─────────────────────────────────────────────────────────────
+
+def get_atr(symbol: str) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 15:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df    = df.dropna(subset=["High", "Low", "Close"])
+        price = float(df["Close"].iloc[-1])
+        atr   = _atr(df)
+        if atr is None:
+            return f"❌ לא ניתן לחשב ATR עבור {symbol}"
+
+        pct = atr / price * 100
+        if pct < 2:
+            interp = "תנודתיות נמוכה — מנייה יציבה יחסית"
+        elif pct < 4:
+            interp = "תנודתיות בינונית — מנייה תקינה לסווינג"
+        else:
+            interp = "תנודתיות גבוהה — מנייה תנודתית, סטופ רחב יותר"
+
+        return (
+            f"📊 *ATR (14 ימים) — {symbol}*\n"
+            f"💵 מחיר: ${price:.2f}\n"
+            f"📏 ATR: ${atr:.2f} ({pct:.1f}% מהמחיר)\n\n"
+            f"📌 *פרשנות:* {interp}\n\n"
+            "🔍 *סיבה:* ATR מודד את התנודתיות הממוצעת היומית. "
+            "גבוה = מנייה תנודתית. נמוך = מנייה יציבה.\n\n"
+            "💡 לחישוב Stop Loss: /stoploss [סימול] [מחיר כניסה]"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"
+
+
+def get_stoploss(symbol: str, entry_price: float) -> str:
+    try:
+        df = _fetch_daily(symbol)
+        if df.empty or len(df) < 15:
+            return f"❌ אין מספיק נתונים עבור {symbol}"
+        df  = df.dropna(subset=["High", "Low", "Close"])
+        atr = _atr(df)
+        if atr is None:
+            return f"❌ לא ניתן לחשב ATR עבור {symbol}"
+
+        sl_1x   = entry_price - atr
+        sl_15x  = entry_price - 1.5 * atr
+        sl_2x   = entry_price - 2.0 * atr
+        target  = entry_price + 2.0 * atr   # 2:1 R/R using 1x ATR as risk
+
+        return (
+            f"🛑 *Stop Loss אוטומטי — {symbol}*\n"
+            f"💵 מחיר כניסה: ${entry_price:.2f}\n"
+            f"📊 ATR (14 ימים): ${atr:.2f}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🛑 שמרני (1x ATR):   ${sl_1x:.2f}\n"
+            f"🛑 רגיל (1.5x ATR):  ${sl_15x:.2f}\n"
+            f"🛑 רחב (2x ATR):     ${sl_2x:.2f}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🎯 יעד מומלץ (R/R 2:1): ${target:.2f}\n\n"
+            "🔍 *סיבה:* ATR מודד את התנודתיות הממוצעת היומית. "
+            "Stop Loss לפי ATR מתחשב בתנודתיות הטבעית של המנייה ומונע יציאה מוקדמת "
+            "מדי מעסקה טובה.\n\n"
+            "⚡ *המלצה:*\n"
+            "  • סווינג 3-5 ימים: השתמש ב-1.5x ATR\n"
+            "  • סווינג שבוע+: השתמש ב-2x ATR\n"
+            "  • תמיד וודא R/R לפחות 2:1"
+        )
+    except Exception as exc:
+        return f"❌ שגיאה ב-{symbol}: {exc}"

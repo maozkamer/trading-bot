@@ -36,6 +36,12 @@ from analysis import (
     build_fear_greed_message,
     build_setups_message,
     get_active_setups,
+    get_ichimoku,
+    get_stoch_rsi,
+    get_pivot_points,
+    get_obv,
+    get_atr,
+    get_stoploss,
     _fetch_daily,
     _find_sr,
 )
@@ -434,6 +440,67 @@ async def cmd_vwap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(get_vwap(symbol), parse_mode="Markdown")
 
 
+async def cmd_ichimoku(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /ichimoku NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב Ichimoku Cloud עבור {symbol}…")
+    result = await asyncio.get_event_loop().run_in_executor(None, get_ichimoku, symbol)
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
+async def cmd_stoch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /stoch NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב Stochastic RSI עבור {symbol}…")
+    await update.message.reply_text(get_stoch_rsi(symbol), parse_mode="Markdown")
+
+
+async def cmd_pivot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /pivot NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב Pivot Points עבור {symbol}…")
+    await update.message.reply_text(get_pivot_points(symbol), parse_mode="Markdown")
+
+
+async def cmd_obv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /obv NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב OBV עבור {symbol}…")
+    await update.message.reply_text(get_obv(symbol), parse_mode="Markdown")
+
+
+async def cmd_atr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    symbol = " ".join(context.args).upper().strip()
+    if not symbol:
+        await update.message.reply_text("שלח: /atr NNE")
+        return
+    await update.message.reply_text(f"⏳ מחשב ATR עבור {symbol}…")
+    await update.message.reply_text(get_atr(symbol), parse_mode="Markdown")
+
+
+async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        await update.message.reply_text("שלח: /stoploss NNE 45.50")
+        return
+    symbol = context.args[0].upper().strip()
+    try:
+        entry = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ מחיר כניסה לא תקין. שלח: /stoploss NNE 45.50")
+        return
+    await update.message.reply_text(f"⏳ מחשב Stop Loss עבור {symbol}…")
+    result = await asyncio.get_event_loop().run_in_executor(None, get_stoploss, symbol, entry)
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+
 async def cmd_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     global alerts_paused
     alerts_paused = True
@@ -459,6 +526,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("📊 גרף"),           KeyboardButton("🎯 סט-אפים")],
         [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
         [KeyboardButton("📐 פיבונאצ'י"),    KeyboardButton("🔎 ניתוח")],
+        [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
+        [KeyboardButton("💹 OBV"),           KeyboardButton("🛑 Stop Loss")],
         [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
     ],
     resize_keyboard=True,
@@ -495,16 +564,24 @@ def build_more_keyboard() -> InlineKeyboardMarkup:
     ])
 
 # Reply-button labels that open the symbol picker
-SYMBOL_ACTIONS = {"📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🎯 סט-אפים", "🔎 ניתוח"}
+SYMBOL_ACTIONS = {
+    "📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🎯 סט-אפים", "🔎 ניתוח",
+    "☁️ Ichimoku", "📉 Stoch RSI", "📐 Pivot", "💹 OBV", "🛑 Stop Loss",
+}
 
 # Map reply-button label → callback prefix
 _ACTION_PREFIX = {
-    "📊 גרף":       "chart",
-    "📐 פיבונאצ'י": "fib",
-    "📉 BB":         "bb",
-    "⚡ VWAP":       "vwap",
-    "🎯 סט-אפים":   "setups",
-    "🔎 ניתוח":     "richanalysis",
+    "📊 גרף":        "chart",
+    "📐 פיבונאצ'י":  "fib",
+    "📉 BB":          "bb",
+    "⚡ VWAP":        "vwap",
+    "🎯 סט-אפים":    "setups",
+    "🔎 ניתוח":      "richanalysis",
+    "☁️ Ichimoku":   "ichimoku",
+    "📉 Stoch RSI":  "stoch",
+    "📐 Pivot":       "pivot",
+    "💹 OBV":         "obv",
+    "🛑 Stop Loss":  "stoploss",
 }
 
 
@@ -534,7 +611,8 @@ async def _send_status(msg) -> None:
     await msg.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def _run_symbol_action(action: str, symbol: str, msg) -> None:
+async def _run_symbol_action(action: str, symbol: str, msg,
+                             ctx: ContextTypes.DEFAULT_TYPE | None = None) -> None:
     """Execute an action (by prefix name) on a symbol."""
     if action == "chart":
         loading = await msg.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
@@ -592,12 +670,46 @@ async def _run_symbol_action(action: str, symbol: str, msg) -> None:
         )
         await msg.reply_text(result, parse_mode="Markdown")
 
+    elif action == "ichimoku":
+        await msg.reply_text(f"⏳ מחשב Ichimoku Cloud עבור {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(None, get_ichimoku, symbol)
+        await msg.reply_text(result, parse_mode="Markdown")
+
+    elif action == "stoch":
+        await msg.reply_text(f"⏳ מחשב Stochastic RSI עבור {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(None, get_stoch_rsi, symbol)
+        await msg.reply_text(result, parse_mode="Markdown")
+
+    elif action == "pivot":
+        await msg.reply_text(f"⏳ מחשב Pivot Points עבור {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(None, get_pivot_points, symbol)
+        await msg.reply_text(result, parse_mode="Markdown")
+
+    elif action == "obv":
+        await msg.reply_text(f"⏳ מחשב OBV עבור {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(None, get_obv, symbol)
+        await msg.reply_text(result, parse_mode="Markdown")
+
+    elif action == "atr":
+        await msg.reply_text(f"⏳ מחשב ATR עבור {symbol}…")
+        result = await asyncio.get_event_loop().run_in_executor(None, get_atr, symbol)
+        await msg.reply_text(result, parse_mode="Markdown")
+
+    elif action == "stoploss":
+        # Symbol selected — ask for the entry price and store pending state
+        await msg.reply_text(
+            f"✅ *{symbol}* נבחר\n\nשלח את מחיר הכניסה (למשל: `45.50`)",
+            parse_mode="Markdown",
+        )
+        if ctx is not None:
+            ctx.user_data["pending_stoploss"] = symbol
+
 
 # ─────────────────────────────────────────────────────────────
 #  Inline callback handler
 # ─────────────────────────────────────────────────────────────
 
-async def handle_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -606,8 +718,9 @@ async def handle_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Symbol actions triggered from the picker
     if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis",
-                  "setups", "richanalysis"):
-        await _run_symbol_action(prefix, payload, query.message)
+                  "setups", "richanalysis",
+                  "ichimoku", "stoch", "pivot", "obv", "atr", "stoploss"):
+        await _run_symbol_action(prefix, payload, query.message, ctx)
 
     # "עוד פקודות" sub-menu actions
     elif prefix == "more":
@@ -647,6 +760,12 @@ async def handle_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
                 "  /bb NNE — Bollinger Bands\n"
                 "  /fib NNE — רמות פיבונאצ'י\n"
                 "  /vwap NNE — VWAP\n"
+                "  /ichimoku NNE — Ichimoku Cloud\n"
+                "  /stoch NNE — Stochastic RSI\n"
+                "  /pivot NNE — Pivot Points יומיים\n"
+                "  /obv NNE — On Balance Volume\n"
+                "  /atr NNE — ATR (תנודתיות)\n"
+                "  /stoploss NNE 45.50 — Stop Loss אוטומטי\n"
                 "  /stop — השהה התראות\n"
                 "  /resume — חדש התראות",
                 parse_mode="Markdown",
@@ -657,8 +776,27 @@ async def handle_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 #  Reply-keyboard text handler
 # ─────────────────────────────────────────────────────────────
 
-async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
+
+    # ── Stop Loss two-step: waiting for entry price ───────────
+    pending_sl = ctx.user_data.get("pending_stoploss")
+    if pending_sl:
+        try:
+            entry = float(text.replace(",", "."))
+            ctx.user_data.pop("pending_stoploss", None)
+            await update.message.reply_text(f"⏳ מחשב Stop Loss עבור {pending_sl}…")
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, get_stoploss, pending_sl, entry
+            )
+            await update.message.reply_text(result, parse_mode="Markdown")
+            return
+        except ValueError:
+            await update.message.reply_text(
+                "❌ מחיר לא תקין. שלח מספר בלבד (למשל: `45.50`)",
+                parse_mode="Markdown",
+            )
+            return
 
     if text == "📈 סטטוס":
         await _send_status(update.message)
@@ -680,9 +818,14 @@ async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
             "vwap":         "⚡ VWAP",
             "setups":       "🎯 סט-אפים",
             "richanalysis": "🔎 ניתוח",
+            "ichimoku":     "☁️ Ichimoku",
+            "stoch":        "📉 Stoch RSI",
+            "pivot":        "📐 Pivot",
+            "obv":          "💹 OBV",
+            "stoploss":     "🛑 Stop Loss",
         }
         await update.message.reply_text(
-            f"בחר מנייה עבור {labels[prefix]}:",
+            f"בחר מנייה עבור {labels.get(prefix, prefix)}:",
             reply_markup=build_symbol_picker(prefix),
         )
 
@@ -729,6 +872,12 @@ def main() -> None:
     app.add_handler(CommandHandler("bb",       cmd_bb))
     app.add_handler(CommandHandler("fib",      cmd_fib))
     app.add_handler(CommandHandler("vwap",     cmd_vwap))
+    app.add_handler(CommandHandler("ichimoku", cmd_ichimoku))
+    app.add_handler(CommandHandler("stoch",    cmd_stoch))
+    app.add_handler(CommandHandler("pivot",    cmd_pivot))
+    app.add_handler(CommandHandler("obv",      cmd_obv))
+    app.add_handler(CommandHandler("atr",      cmd_atr))
+    app.add_handler(CommandHandler("stoploss", cmd_stoploss))
     app.add_handler(CommandHandler("stop",     cmd_stop))
     app.add_handler(CommandHandler("resume",   cmd_resume))
     app.add_handler(CallbackQueryHandler(handle_callback))
