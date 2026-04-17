@@ -127,7 +127,17 @@ async def run_scan(app: Application) -> None:
     for symbol in WATCHLIST:
         try:
             # ── Technical alerts ─────────────────────────────
+            # מפתחות שמסוננים — לא שולחים התראות אוטומטיות עליהם
+            _MUTED_KEYS = (
+                "rsi_oversold", "rsi_overbought",
+                "macd_bullish", "macd_bearish",
+                "bb_upper_break", "bb_lower_break",
+                "golden_cross", "death_cross",
+                "vwap_cross_up", "vwap_cross_down",
+            )
             for alert in analyze_symbol(symbol):
+                if any(alert.key.startswith(k) for k in _MUTED_KEYS):
+                    continue
                 if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
                     continue
                 save_alert(symbol, alert.key)
