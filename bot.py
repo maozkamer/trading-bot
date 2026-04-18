@@ -243,7 +243,7 @@ async def api_fear_greed():
 
 
 # Serve Mini App static files
-api.mount("/", StaticFiles(directory="miniapp", html=True), name="miniapp")
+api.mount("/app", StaticFiles(directory="miniapp", html=True), name="miniapp")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -478,7 +478,7 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     OWNER_CHAT_ID = update.effective_chat.id
     save_setting("chat_id", str(OWNER_CHAT_ID))
 
-    mini_app_url = f"https://trading-bot-production-5207.up.railway.app"
+    mini_app_url = f"https://trading-bot-production-5207.up.railway.app/app"
     symbols_str = " | ".join(_dynamic_watchlist)
     text = (
         "📈 *בוט מסחר סווינג — פעיל!*\n\n"
