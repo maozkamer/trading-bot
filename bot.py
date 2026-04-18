@@ -10,6 +10,11 @@ import os
 from datetime import datetime
 
 import pytz
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -59,6 +64,7 @@ from database import (
 # ─────────────────────────────────────────────────────────────
 TOKEN  = os.environ.get("TELEGRAM_TOKEN")
 EST_TZ = pytz.timezone("US/Eastern")
+PORT   = int(os.environ.get("PORT", 8080))
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -68,6 +74,176 @@ log = logging.getLogger(__name__)
 
 OWNER_CHAT_ID: int | None = None
 alerts_paused: bool = False
+
+# Mutable watchlist (copy of WATCHLIST so we can edit it at runtime)
+_dynamic_watchlist: list[str] = list(WATCHLIST)
+
+
+# ─────────────────────────────────────────────────────────────
+#  FastAPI — Mini App backend
+# ─────────────────────────────────────────────────────────────
+
+api = FastAPI()
+api.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class SymbolRequest(BaseModel):
+    symbol: str
+
+
+@api.get("/api/watchlist")
+async def api_watchlist():
+    """Returns watchlist with current price + RSI for each symbol."""
+    try:
+        data = await asyncio.get_event_loop().run_in_executor(None, get_quick_status)
+        # Filter to only symbols in our dynamic watchlist
+        filtered = [d for d in data if d["symbol"] in _dynamic_watchlist]
+        return {"symbols": filtered, "watchlist": _dynamic_watchlist}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api.get("/api/screener")
+async def api_screener():
+    """Returns screener results: breakouts, volume spikes, RSI zones."""
+    try:
+        results = {"breakouts": [], "volume": [], "oversold": [], "overbought": []}
+        data = await asyncio.get_event_loop().run_in_executor(None, get_quick_status)
+
+        for d in data:
+            if d["symbol"] not in _dynamic_watchlist:
+                continue
+            if d["price"] is None:
+                continue
+            rsi = d.get("rsi")
+            vol_ratio = d.get("vol_ratio", 1.0) or 1.0
+            change = d.get("change", 0) or 0
+
+            entry = {
+                "symbol": d["symbol"],
+                "price": d["price"],
+                "change": change,
+                "rsi": rsi,
+                "vol_ratio": vol_ratio,
+            }
+
+            if rsi and rsi < 35:
+                results["oversold"].append(entry)
+            elif rsi and rsi > 70:
+                results["overbought"].append(entry)
+
+            if vol_ratio >= 2.0:
+                results["volume"].append(entry)
+
+            if change >= 3.0 and vol_ratio >= 1.3:
+                results["breakouts"].append(entry)
+
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api.get("/api/analysis/{symbol}")
+async def api_analysis(symbol: str):
+    """Returns full technical analysis for a symbol."""
+    symbol = symbol.upper()
+    try:
+        df = await asyncio.get_event_loop().run_in_executor(None, _fetch_daily, symbol)
+        if df is None or df.empty or len(df) < 5:
+            raise HTTPException(status_code=404, detail=f"אין נתונים עבור {symbol}")
+
+        supports, resistances = _find_sr(df)
+        closes = df["Close"].tolist()
+        latest = float(df["Close"].iloc[-1])
+        prev   = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
+        change = (latest - prev) / prev * 100 if prev else 0
+
+        # RSI
+        from analysis import _rsi, _macd, _bollinger, _sma
+        rsi_val = _rsi(closes)
+
+        # MACD
+        macd_val, signal_val, hist_val, _ = _macd(closes)
+
+        # Bollinger
+        bb_upper, bb_mid, bb_lower = _bollinger(closes)
+
+        # MA50 / MA200
+        ma50_cur,  _ = _sma(closes, 50)
+        ma200_cur, _ = _sma(closes, 200)
+
+        # Recent candles for chart data (last 30)
+        candles = []
+        df_recent = df.tail(30)
+        for idx, row in df_recent.iterrows():
+            candles.append({
+                "date":   idx.strftime("%d/%m"),
+                "open":   round(float(row["Open"]),  2),
+                "high":   round(float(row["High"]),  2),
+                "low":    round(float(row["Low"]),   2),
+                "close":  round(float(row["Close"]), 2),
+                "volume": int(row["Volume"]),
+            })
+
+        return {
+            "symbol":      symbol,
+            "price":       round(latest, 2),
+            "change":      round(change, 2),
+            "rsi":         round(rsi_val, 1) if rsi_val else None,
+            "macd":        round(macd_val, 3) if macd_val else None,
+            "macd_signal": round(signal_val, 3) if signal_val else None,
+            "macd_hist":   round(hist_val, 3) if hist_val else None,
+            "bb_upper":    round(bb_upper, 2) if bb_upper else None,
+            "bb_mid":      round(bb_mid, 2) if bb_mid else None,
+            "bb_lower":    round(bb_lower, 2) if bb_lower else None,
+            "ma50":        round(ma50_cur, 2) if ma50_cur else None,
+            "ma200":       round(ma200_cur, 2) if ma200_cur else None,
+            "supports":    [round(s, 2) for s in supports[:3]],
+            "resistances": [round(r, 2) for r in resistances[:3]],
+            "candles":     candles,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api.post("/api/watchlist/add")
+async def api_watchlist_add(req: SymbolRequest):
+    symbol = req.symbol.upper().strip()
+    if symbol in _dynamic_watchlist:
+        return {"ok": True, "watchlist": _dynamic_watchlist}
+    _dynamic_watchlist.append(symbol)
+    save_setting("dynamic_watchlist", ",".join(_dynamic_watchlist))
+    return {"ok": True, "watchlist": _dynamic_watchlist}
+
+
+@api.post("/api/watchlist/remove")
+async def api_watchlist_remove(req: SymbolRequest):
+    symbol = req.symbol.upper().strip()
+    if symbol in _dynamic_watchlist:
+        _dynamic_watchlist.remove(symbol)
+        save_setting("dynamic_watchlist", ",".join(_dynamic_watchlist))
+    return {"ok": True, "watchlist": _dynamic_watchlist}
+
+
+@api.get("/api/fear_greed")
+async def api_fear_greed():
+    try:
+        from analysis import fetch_fear_greed
+        data = await asyncio.get_event_loop().run_in_executor(None, fetch_fear_greed)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Serve Mini App static files
+api.mount("/", StaticFiles(directory="miniapp", html=True), name="miniapp")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -87,7 +263,6 @@ def format_alert(alert: Alert) -> str:
 
 
 def format_sr_alert(alert: Alert) -> str:
-    """Format for S/R proximity alerts (different layout)."""
     level_type = "תמיכה" if "sup" in alert.key else "התנגדות"
     level_price = alert.support if "sup" in alert.key else alert.resistance
     dist_pct = abs(alert.price - level_price) / alert.price * 100 if level_price else 0
@@ -121,13 +296,11 @@ async def run_scan(app: Application) -> None:
         log.info("Alerts paused — skipping scan")
         return
 
-    log.info("Scanning %d symbols…", len(WATCHLIST))
+    log.info("Scanning %d symbols…", len(_dynamic_watchlist))
     sent = 0
 
-    for symbol in WATCHLIST:
+    for symbol in _dynamic_watchlist:
         try:
-            # ── Technical alerts ─────────────────────────────
-            # מפתחות שמסוננים — לא שולחים התראות אוטומטיות עליהם
             _MUTED_KEYS = (
                 "rsi_oversold", "rsi_overbought",
                 "macd_bullish", "macd_bearish",
@@ -149,7 +322,6 @@ async def run_scan(app: Application) -> None:
                 sent += 1
                 await asyncio.sleep(0.4)
 
-            # ── S/R proximity alerts ──────────────────────────
             if is_market_hours():
                 for alert in check_sr_proximity(symbol):
                     if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
@@ -171,13 +343,12 @@ async def run_scan(app: Application) -> None:
 
 
 async def scan_loop(app: Application) -> None:
-    await asyncio.sleep(20)          # startup grace period
+    await asyncio.sleep(20)
     while True:
         try:
             await run_scan(app)
         except Exception as exc:
             log.error("scan_loop error: %s", exc)
-
         in_market  = is_market_hours()
         sleep_secs = 3600 if in_market else 14400
         log.info("Next scan in %.0f min  (market_hours=%s)", sleep_secs / 60, in_market)
@@ -185,7 +356,6 @@ async def scan_loop(app: Application) -> None:
 
 
 def _seconds_until_utc(hour: int, minute: int) -> float:
-    """Seconds until the next occurrence of HH:MM UTC."""
     import pytz as _pytz
     tz  = _pytz.utc
     now = datetime.now(tz)
@@ -197,7 +367,6 @@ def _seconds_until_utc(hour: int, minute: int) -> float:
 
 
 def _seconds_until_time(hour: int, minute: int) -> float:
-    """Seconds until the next occurrence of HH:MM in Israel time."""
     import pytz as _pytz
     tz  = _pytz.timezone("Asia/Jerusalem")
     now = datetime.now(tz)
@@ -209,85 +378,63 @@ def _seconds_until_time(hour: int, minute: int) -> float:
 
 
 async def morning_news_loop(app: Application) -> None:
-    """Sends morning news digest every day at 06:00 UTC (= 09:00 Israel time)."""
     while True:
         secs = _seconds_until_utc(6, 0)
         log.info("Morning news scheduled in %.0f min", secs / 60)
         await asyncio.sleep(secs)
         if OWNER_CHAT_ID is None:
-            log.warning("morning_news_loop: no chat_id yet — waiting 60s")
             await asyncio.sleep(60)
             continue
         try:
-            log.info("שולח חדשות בוקר...")
-            msg = await asyncio.get_event_loop().run_in_executor(
-                None, build_morning_message
-            )
-            await app.bot.send_message(
-                chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
-            )
-            log.info("Morning news sent successfully")
+            msg = await asyncio.get_event_loop().run_in_executor(None, build_morning_message)
+            await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
         except Exception as exc:
             log.error("morning_news_loop error: %s", exc)
-        await asyncio.sleep(61)   # avoid double-fire in the same minute
+        await asyncio.sleep(61)
 
 
 async def screener_loop(app: Application) -> None:
-    """Sends morning screener every day at 09:00 Israel time."""
     while True:
         await asyncio.sleep(_seconds_until_time(9, 0))
         if OWNER_CHAT_ID is None:
             await asyncio.sleep(60)
             continue
         try:
-            msg = await asyncio.get_event_loop().run_in_executor(
-                None, build_screener_message
-            )
-            await app.bot.send_message(
-                chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
-            )
-            log.info("Morning screener sent")
+            msg = await asyncio.get_event_loop().run_in_executor(None, build_screener_message)
+            await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
         except Exception as exc:
             log.error("screener_loop error: %s", exc)
-        await asyncio.sleep(61)   # avoid double-fire in the same minute
+        await asyncio.sleep(61)
 
 
 async def earnings_loop(app: Application) -> None:
-    """Sends earnings reminders every day at 08:30 Israel time."""
     while True:
         await asyncio.sleep(_seconds_until_time(8, 30))
         if OWNER_CHAT_ID is None:
             await asyncio.sleep(60)
             continue
         try:
-            messages = await asyncio.get_event_loop().run_in_executor(
-                None, build_earnings_messages
-            )
+            messages = await asyncio.get_event_loop().run_in_executor(None, build_earnings_messages)
             for msg in messages:
                 symbol = msg.split("*")[1] if "*" in msg else "earnings"
                 key    = f"earnings_{symbol}_{datetime.now().strftime('%Y%m%d')}"
                 if is_alert_recent(symbol, key, 24):
                     continue
                 save_alert(symbol, key)
-                await app.bot.send_message(
-                    chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown"
-                )
+                await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
                 await asyncio.sleep(0.4)
-            log.info("Earnings check done — %d alerts", len(messages))
         except Exception as exc:
             log.error("earnings_loop error: %s", exc)
         await asyncio.sleep(61)
 
 
 async def setup_scan_loop(app: Application) -> None:
-    """Scans for active setups every hour during market hours, sends alerts."""
-    await asyncio.sleep(30)   # startup grace
+    await asyncio.sleep(30)
     while True:
         try:
             if OWNER_CHAT_ID is not None and not alerts_paused and is_market_hours():
-                log.info("Scanning setups for %d symbols…", len(WATCHLIST))
                 sent = 0
-                for symbol in WATCHLIST:
+                for symbol in _dynamic_watchlist:
                     try:
                         setups = await asyncio.get_event_loop().run_in_executor(
                             None, get_active_setups, symbol
@@ -317,7 +464,6 @@ async def setup_scan_loop(app: Application) -> None:
                         await asyncio.sleep(1.0)
                     except Exception as exc:
                         log.warning("setup_scan error %s: %s", symbol, exc)
-                log.info("Setup scan done — %d alerts sent", sent)
         except Exception as exc:
             log.error("setup_scan_loop error: %s", exc)
         await asyncio.sleep(3600)
@@ -332,37 +478,45 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     OWNER_CHAT_ID = update.effective_chat.id
     save_setting("chat_id", str(OWNER_CHAT_ID))
 
-    symbols_str = " | ".join(WATCHLIST)
+    mini_app_url = f"https://trading-bot-production-5207.up.railway.app"
+    symbols_str = " | ".join(_dynamic_watchlist)
     text = (
         "📈 *בוט מסחר סווינג — פעיל!*\n\n"
-        f"🔍 מנטר *{len(WATCHLIST)} מניות:*\n"
+        f"🔍 מנטר *{len(_dynamic_watchlist)} מניות:*\n"
         f"`{symbols_str}`\n\n"
         "⏰ *תדירות סריקה:*\n"
         "  • שעות מסחר (09:30‑16:00 EST): כל שעה\n"
         "  • לילה / סוף שבוע: כל 4 שעות\n\n"
+        "📱 *Dashboard:* לחץ על הכפתור למטה\n\n"
         "📋 *פקודות:*\n"
         "  /status — מחירים נוכחיים + RSI\n"
         "  /analysis AAPL — ניתוח מלא\n"
         "  /levels AAPL — תמיכות והתנגדויות\n"
         "  /chart AAPL — גרף נרות 30 ימים\n"
         "  /stop — השהה התראות\n"
-        "  /resume — חדש התראות\n\n"
-        "🚨 *סוגי התראות:*\n"
-        "  📊 תמיכה / התנגדות / פריצה\n"
-        "  📈 Bull/Bear Flag, Double Top/Bottom,\n"
-        "      Head & Shoulders, Triangle, Breakout, Cup & Handle\n"
-        "  🔢 RSI, MACD, MA50/200, Golden/Death Cross, נפח\n"
-        "  🕯️ Doji, Hammer, Engulfing, Morning/Evening Star\n"
-        "  💰 ירידה/עלייה חדה, Gap Up/Down"
+        "  /resume — חדש התראות"
     )
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton("📱 פתח Dashboard", web_app={"url": mini_app_url})],
+            [KeyboardButton("📈 סטטוס"),        KeyboardButton("🔍 סקרינר")],
+            [KeyboardButton("📊 גרף"),           KeyboardButton("🎯 סט-אפים")],
+            [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
+            [KeyboardButton("📐 פיבונאצ'י"),    KeyboardButton("🔎 ניתוח")],
+            [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
+            [KeyboardButton("💹 OBV"),           KeyboardButton("🛑 Stop Loss")],
+            [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
+        ],
+        resize_keyboard=True,
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
     data  = get_quick_status()
     lines = ["📊 *סטטוס מניות נוכחי*\n"]
-
     for d in data:
         if d["price"] is None:
             lines.append(f"  ❌ {d['symbol']:6s} — שגיאה")
@@ -374,7 +528,6 @@ async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         rsi_s = f"RSI {rsi:.0f}" if rsi is not None else "     "
         flag  = (" 🔥" if rsi < 30 else " ⚠️" if rsi > 70 else "") if rsi else ""
         lines.append(f"  {arrow} {d['symbol']:6s}  ${d['price']:8.2f}  {chg_s:>7}   {rsi_s}{flag}")
-
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -504,7 +657,7 @@ async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         entry = float(context.args[1])
     except ValueError:
-        await update.message.reply_text("❌ מחיר כניסה לא תקין. שלח: /stoploss NNE 45.50")
+        await update.message.reply_text("❌ מחיר כניסה לא תקין.")
         return
     await update.message.reply_text(f"⏳ מחשב Stop Loss עבור {symbol}…")
     result = await asyncio.get_event_loop().run_in_executor(None, get_stoploss, symbol, entry)
@@ -529,7 +682,6 @@ async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 PENDING_KEY = "pending_action"
 
-# Persistent bottom keyboard
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton("📈 סטטוס"),        KeyboardButton("🔍 סקרינר")],
@@ -543,7 +695,6 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# Inline symbol picker — 4 per row
 _SYMBOLS_ROWS = [
     ["NNE",  "MARA", "PLTR", "IREN"],
     ["SOFI", "AAPL", "NVDA", "TSLA"],
@@ -554,7 +705,6 @@ _SYMBOLS_ROWS = [
 ]
 
 def build_symbol_picker(action_prefix: str) -> InlineKeyboardMarkup:
-    """Returns an inline keyboard with every watchlist symbol."""
     rows = [
         [InlineKeyboardButton(sym, callback_data=f"{action_prefix}:{sym}") for sym in row]
         for row in _SYMBOLS_ROWS
@@ -573,13 +723,11 @@ def build_more_keyboard() -> InlineKeyboardMarkup:
         ],
     ])
 
-# Reply-button labels that open the symbol picker
 SYMBOL_ACTIONS = {
     "📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🎯 סט-אפים", "🔎 ניתוח",
     "☁️ Ichimoku", "📉 Stoch RSI", "📐 Pivot", "💹 OBV", "🛑 Stop Loss",
 }
 
-# Map reply-button label → callback prefix
 _ACTION_PREFIX = {
     "📊 גרף":        "chart",
     "📐 פיבונאצ'י":  "fib",
@@ -600,7 +748,7 @@ async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Shared action executor (used by inline callbacks + commands)
+#  Shared action executor
 # ─────────────────────────────────────────────────────────────
 
 async def _send_status(msg) -> None:
@@ -623,7 +771,6 @@ async def _send_status(msg) -> None:
 
 async def _run_symbol_action(action: str, symbol: str, msg,
                              ctx: ContextTypes.DEFAULT_TYPE | None = None) -> None:
-    """Execute an action (by prefix name) on a symbol."""
     if action == "chart":
         loading = await msg.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
         try:
@@ -643,70 +790,51 @@ async def _run_symbol_action(action: str, symbol: str, msg,
             await msg.reply_photo(photo=buf, caption=caption, parse_mode="Markdown")
             await loading.delete()
         except Exception as exc:
-            log.error("Chart error %s: %s", symbol, exc)
             await loading.edit_text(f"❌ שגיאה: {exc}")
-
     elif action == "fib":
         await msg.reply_text(f"⏳ מחשב רמות פיבונאצ'י עבור {symbol}…")
         await msg.reply_text(get_fibonacci_levels(symbol), parse_mode="Markdown")
-
     elif action == "bb":
         await msg.reply_text(f"⏳ מחשב Bollinger Bands עבור {symbol}…")
         await msg.reply_text(get_bollinger_levels(symbol), parse_mode="Markdown")
-
     elif action == "vwap":
         await msg.reply_text(f"⏳ מחשב VWAP עבור {symbol}…")
         await msg.reply_text(get_vwap(symbol), parse_mode="Markdown")
-
     elif action == "levels":
         await msg.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
         await msg.reply_text(get_levels(symbol), parse_mode="Markdown")
-
     elif action == "analysis":
         await msg.reply_text(f"⏳ מנתח את {symbol}…")
         await msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
-
     elif action == "setups":
         await msg.reply_text(f"⏳ מחפש סט-אפים עבור {symbol}…")
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, build_setups_message, symbol
-        )
+        result = await asyncio.get_event_loop().run_in_executor(None, build_setups_message, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "richanalysis":
         await msg.reply_text(f"⏳ מנתח את {symbol}…")
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, get_rich_analysis, symbol
-        )
+        result = await asyncio.get_event_loop().run_in_executor(None, get_rich_analysis, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "ichimoku":
         await msg.reply_text(f"⏳ מחשב Ichimoku Cloud עבור {symbol}…")
         result = await asyncio.get_event_loop().run_in_executor(None, get_ichimoku, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "stoch":
         await msg.reply_text(f"⏳ מחשב Stochastic RSI עבור {symbol}…")
         result = await asyncio.get_event_loop().run_in_executor(None, get_stoch_rsi, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "pivot":
         await msg.reply_text(f"⏳ מחשב Pivot Points עבור {symbol}…")
         result = await asyncio.get_event_loop().run_in_executor(None, get_pivot_points, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "obv":
         await msg.reply_text(f"⏳ מחשב OBV עבור {symbol}…")
         result = await asyncio.get_event_loop().run_in_executor(None, get_obv, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "atr":
         await msg.reply_text(f"⏳ מחשב ATR עבור {symbol}…")
         result = await asyncio.get_event_loop().run_in_executor(None, get_atr, symbol)
         await msg.reply_text(result, parse_mode="Markdown")
-
     elif action == "stoploss":
-        # Symbol selected — ask for the entry price and store pending state
         await msg.reply_text(
             f"✅ *{symbol}* נבחר\n\nשלח את מחיר הכניסה (למשל: `45.50`)",
             parse_mode="Markdown",
@@ -723,43 +851,31 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     query = update.callback_query
     await query.answer()
     data = query.data
-
     prefix, _, payload = data.partition(":")
 
-    # Symbol actions triggered from the picker
     if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis",
                   "setups", "richanalysis",
                   "ichimoku", "stoch", "pivot", "obv", "atr", "stoploss"):
         await _run_symbol_action(prefix, payload, query.message, ctx)
 
-    # "עוד פקודות" sub-menu actions
     elif prefix == "more":
         if payload == "earnings":
             await query.message.reply_text("⏳ בודק Earnings…")
-            from news import build_earnings_messages
-            msgs = await asyncio.get_event_loop().run_in_executor(
-                None, build_earnings_messages
-            )
+            msgs = await asyncio.get_event_loop().run_in_executor(None, build_earnings_messages)
             if msgs:
                 for m in msgs:
                     await query.message.reply_text(m, parse_mode="Markdown")
             else:
                 await query.message.reply_text("אין Earnings קרובים ברשימה.")
-
         elif payload == "levels":
             await query.message.reply_text(
                 "בחר מנייה לרמות תמיכה/התנגדות:",
                 reply_markup=build_symbol_picker("levels"),
             )
-
         elif payload == "news":
             await query.message.reply_text("⏳ מושך חדשות…")
-            from news import build_morning_message
-            msg = await asyncio.get_event_loop().run_in_executor(
-                None, build_morning_message
-            )
+            msg = await asyncio.get_event_loop().run_in_executor(None, build_morning_message)
             await query.message.reply_text(msg, parse_mode="Markdown")
-
         elif payload == "help":
             await query.message.reply_text(
                 "📋 *פקודות זמינות:*\n"
@@ -789,16 +905,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
 
-    # ── Stop Loss two-step: waiting for entry price ───────────
     pending_sl = ctx.user_data.get("pending_stoploss")
     if pending_sl:
         try:
             entry = float(text.replace(",", "."))
             ctx.user_data.pop("pending_stoploss", None)
             await update.message.reply_text(f"⏳ מחשב Stop Loss עבור {pending_sl}…")
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, get_stoploss, pending_sl, entry
-            )
+            result = await asyncio.get_event_loop().run_in_executor(None, get_stoploss, pending_sl, entry)
             await update.message.reply_text(result, parse_mode="Markdown")
             return
         except ValueError:
@@ -810,66 +923,53 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if text == "📈 סטטוס":
         await _send_status(update.message)
-
     elif text == "🔍 סקרינר":
         await update.message.reply_text("⏳ מריץ סקרינר… (עשוי לקחת זמן)")
-        from news import build_screener_message
-        msg = await asyncio.get_event_loop().run_in_executor(
-            None, build_screener_message
-        )
+        msg = await asyncio.get_event_loop().run_in_executor(None, build_screener_message)
         await update.message.reply_text(msg, parse_mode="Markdown")
-
     elif text in SYMBOL_ACTIONS:
         prefix = _ACTION_PREFIX[text]
         labels = {
-            "chart":        "📊 גרף",
-            "fib":          "📐 פיבונאצ'י",
-            "bb":           "📉 BB",
-            "vwap":         "⚡ VWAP",
-            "setups":       "🎯 סט-אפים",
-            "richanalysis": "🔎 ניתוח",
-            "ichimoku":     "☁️ Ichimoku",
-            "stoch":        "📉 Stoch RSI",
-            "pivot":        "📐 Pivot",
-            "obv":          "💹 OBV",
-            "stoploss":     "🛑 Stop Loss",
+            "chart": "📊 גרף", "fib": "📐 פיבונאצ'י", "bb": "📉 BB",
+            "vwap": "⚡ VWAP", "setups": "🎯 סט-אפים", "richanalysis": "🔎 ניתוח",
+            "ichimoku": "☁️ Ichimoku", "stoch": "📉 Stoch RSI", "pivot": "📐 Pivot",
+            "obv": "💹 OBV", "stoploss": "🛑 Stop Loss",
         }
         await update.message.reply_text(
             f"בחר מנייה עבור {labels.get(prefix, prefix)}:",
             reply_markup=build_symbol_picker(prefix),
         )
-
     elif text == "😱 Fear & Greed":
         await update.message.reply_text("⏳ מושך Fear & Greed Index…")
-        msg = await asyncio.get_event_loop().run_in_executor(
-            None, build_fear_greed_message
-        )
+        msg = await asyncio.get_event_loop().run_in_executor(None, build_fear_greed_message)
         await update.message.reply_text(msg, parse_mode="Markdown")
-
     elif text == "🗂 עוד פקודות":
-        await update.message.reply_text(
-            "בחר פעולה:",
-            reply_markup=build_more_keyboard(),
-        )
+        await update.message.reply_text("בחר פעולה:", reply_markup=build_more_keyboard())
 
 
 # ─────────────────────────────────────────────────────────────
-#  Main
+#  Main — runs FastAPI + Telegram bot concurrently
 # ─────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global OWNER_CHAT_ID
+    global OWNER_CHAT_ID, _dynamic_watchlist
 
     if not TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN לא מוגדר! הוסף אותו כ-environment variable")
+        raise RuntimeError("TELEGRAM_TOKEN לא מוגדר!")
 
     init_db()
 
-    # Restore owner chat_id from previous session
+    # Restore chat_id
     saved = get_setting("chat_id")
     if saved:
         OWNER_CHAT_ID = int(saved)
         log.info("Restored owner chat_id: %d", OWNER_CHAT_ID)
+
+    # Restore dynamic watchlist
+    saved_wl = get_setting("dynamic_watchlist")
+    if saved_wl:
+        _dynamic_watchlist = saved_wl.split(",")
+        log.info("Restored watchlist: %s", _dynamic_watchlist)
 
     app = Application.builder().token(TOKEN).build()
 
@@ -899,10 +999,15 @@ def main() -> None:
         asyncio.create_task(earnings_loop(application))
         asyncio.create_task(screener_loop(application))
         asyncio.create_task(setup_scan_loop(application))
+        # Start FastAPI web server
+        config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="warning")
+        server = uvicorn.Server(config)
+        asyncio.create_task(server.serve())
+        log.info("✅ FastAPI server started on port %d", PORT)
 
     app.post_init = post_init
 
-    log.info("✅ Trading bot started — watching %d symbols", len(WATCHLIST))
+    log.info("✅ Trading bot started — watching %d symbols", len(_dynamic_watchlist))
     app.run_polling(drop_pending_updates=True)
 
 
