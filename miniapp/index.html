@@ -1,955 +1,1169 @@
-"""
-Swing-trading Telegram bot — main entry point.
-Scans WATCHLIST every hour during US market hours, every 4 hours at night.
-All messages in Hebrew.
-"""
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Trading Dashboard</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.1.1/dist/chartjs-chart-financial.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
 
-import asyncio
-import logging
-import os
-from datetime import datetime
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --accent: #1f6feb;
+    --radius: 10px;
+  }
 
-import pytz
-import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-Application,
-CallbackQueryHandler,
-CommandHandler,
-ContextTypes,
-MessageHandler,
-filters,
-)
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+    font-size: 14px;
+  }
 
-from news import build_morning_message, build_earnings_messages, build_screener_message
-from analysis import (
-WATCHLIST,
-Alert,
-analyze_symbol,
-check_sr_proximity,
-get_full_analysis,
-get_rich_analysis,
-get_levels,
-get_quick_status,
-get_bollinger_levels,
-get_fibonacci_levels,
-get_vwap,
-build_fear_greed_message,
-build_setups_message,
-get_active_setups,
-get_ichimoku,
-get_stoch_rsi,
-get_pivot_points,
-get_obv,
-get_atr,
-get_stoploss,
-_fetch_daily,
-_find_sr,
-)
-from charts import build_chart
-from database import (
-get_setting,
-init_db,
-is_alert_recent,
-save_alert,
-save_setting,
-)
+  /* ── NAV ── */
+  .nav {
+    display: flex;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
 
-# ─────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-EST_TZ = pytz.timezone("US/Eastern")
-PORT = int(os.environ.get("PORT", 8080))
+  .nav-btn {
+    flex: 1;
+    padding: 12px 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    transition: color 0.2s;
+    -webkit-tap-highlight-color: transparent;
+  }
 
-logging.basicConfig(
-format="%(asctime)s | %(levelname)s | %(message)s",
-level=logging.INFO,
-)
-log = logging.getLogger(__name__)
+  .nav-btn .icon { font-size: 18px; }
+  .nav-btn.active { color: var(--blue); border-bottom: 2px solid var(--blue); }
 
-OWNER_CHAT_ID: int | None = None
-alerts_paused: bool = False
+  /* ── PAGES ── */
+  .page { display: none; padding: 12px; }
+  .page.active { display: block; }
 
-# Mutable watchlist (copy of WATCHLIST so we can edit it at runtime)
-_dynamic_watchlist: list[str] = list(WATCHLIST)
+  /* ── CARDS ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    margin-bottom: 10px;
+  }
 
+  .card-title {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
 
-# ─────────────────────────────────────────────────────────────
-# FastAPI — Mini App backend
-# ─────────────────────────────────────────────────────────────
+  /* ── WATCHLIST ── */
+  .stock-row {
+    display: flex;
+    align-items: center;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.15s;
+    border-radius: 6px;
+    padding: 10px 8px;
+  }
 
-api = FastAPI()
-api.add_middleware(
-CORSMiddleware,
-allow_origins=["*"],
-allow_methods=["*"],
-allow_headers=["*"],
-)
+  .stock-row:last-child { border-bottom: none; }
+  .stock-row:active { background: var(--surface2); }
 
+  .stock-symbol {
+    font-weight: 700;
+    font-size: 15px;
+    min-width: 75px;
+    color: var(--text);
+  }
 
-class SymbolRequest(BaseModel):
-symbol: str
+  .stock-price {
+    flex: 1;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: center;
+  }
 
+  .stock-change {
+    min-width: 68px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 3px 7px;
+    border-radius: 5px;
+  }
 
-@api.get("/api/watchlist")
-async def api_watchlist():
-"""Returns watchlist with current price + RSI for each symbol."""
-try:
-data = await asyncio.get_event_loop().run_in_executor(None, get_quick_status)
-# Filter to only symbols in our dynamic watchlist
-filtered = [d for d in data if d["symbol"] in _dynamic_watchlist]
-return {"symbols": filtered, "watchlist": _dynamic_watchlist}
-except Exception as e:
-raise HTTPException(status_code=500, detail=str(e))
+  .stock-rsi {
+    min-width: 60px;
+    text-align: left;
+    font-size: 12px;
+    color: var(--text-muted);
+    padding-right: 4px;
+  }
 
+  .up { color: var(--green); background: rgba(63,185,80,0.12); }
+  .down { color: var(--red); background: rgba(248,81,73,0.12); }
+  .neutral { color: var(--text-muted); background: var(--surface2); }
 
-@api.get("/api/screener")
-async def api_screener():
-"""Returns screener results: breakouts, volume spikes, RSI zones."""
-try:
-results = {"breakouts": [], "volume": [], "oversold": [], "overbought": []}
-data = await asyncio.get_event_loop().run_in_executor(None, get_quick_status)
+  /* ── RSI BADGE ── */
+  .rsi-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .rsi-hot { background: rgba(248,81,73,0.2); color: var(--red); }
+  .rsi-cold { background: rgba(63,185,80,0.2); color: var(--green); }
+  .rsi-norm { color: var(--text-muted); }
 
-for d in data:
-if d["symbol"] not in _dynamic_watchlist:
-continue
-if d["price"] is None:
-continue
-rsi = d.get("rsi")
-vol_ratio = d.get("vol_ratio", 1.0) or 1.0
-change = d.get("change", 0) or 0
+  /* ── SCREENER ── */
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 14px 0 8px;
+  }
 
-entry = {
-"symbol": d["symbol"],
-"price": d["price"],
-"change": change,
-"rsi": rsi,
-"vol_ratio": vol_ratio,
+  .screener-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: var(--surface2);
+    border-radius: 8px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+
+  .screener-item:active { opacity: 0.7; }
+  .screener-sym { font-weight: 700; font-size: 14px; }
+  .screener-detail { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .screener-badge {
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge-green { background: rgba(63,185,80,0.18); color: var(--green); }
+  .badge-red   { background: rgba(248,81,73,0.18); color: var(--red); }
+  .badge-yellow{ background: rgba(210,153,34,0.18); color: var(--yellow); }
+  .badge-blue  { background: rgba(88,166,255,0.18); color: var(--blue); }
+
+  /* ── ANALYSIS ── */
+  .symbol-input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .symbol-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 15px;
+    text-transform: uppercase;
+    outline: none;
+    direction: ltr;
+  }
+
+  .symbol-input:focus { border-color: var(--accent); }
+
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+
+  .btn-primary:active { opacity: 0.8; }
+
+  .indicators-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .indicator-card {
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+  }
+
+  .indicator-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+
+  .indicator-value {
+    font-size: 16px;
+    font-weight: 700;
+  }
+
+  .indicator-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  .levels-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .level-block {
+    flex: 1;
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+
+  .level-block-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+
+  .level-item {
+    font-size: 13px;
+    padding: 3px 0;
+    font-weight: 600;
+  }
+
+  .chart-container {
+    position: relative;
+    height: 220px;
+    margin-bottom: 10px;
+  }
+
+  /* ── FEAR & GREED ── */
+  .fg-gauge-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 0;
+  }
+
+  .fg-gauge {
+    position: relative;
+    width: 240px;
+    height: 130px;
+    margin-bottom: 16px;
+  }
+
+  .fg-label {
+    font-size: 28px;
+    font-weight: 800;
+    margin-bottom: 4px;
+    text-align: center;
+  }
+
+  .fg-name {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    text-align: center;
+  }
+
+  .fg-prev {
+    font-size: 13px;
+    color: var(--text-muted);
+    text-align: center;
+    margin-bottom: 20px;
+  }
+
+  .fg-scale {
+    display: flex;
+    width: 100%;
+    max-width: 320px;
+    gap: 4px;
+    margin: 0 auto;
+  }
+
+  .fg-scale-item {
+    flex: 1;
+    text-align: center;
+    font-size: 10px;
+    padding: 5px 2px;
+    border-radius: 5px;
+    font-weight: 600;
+  }
+
+  .fg-extreme-fear { background: rgba(248,81,73,0.25); color: var(--red); }
+  .fg-fear         { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .fg-neutral      { background: rgba(139,148,158,0.2); color: var(--text-muted); }
+  .fg-greed        { background: rgba(63,185,80,0.18); color: var(--green); }
+  .fg-extreme-greed{ background: rgba(63,185,80,0.3); color: #4ae168; }
+
+  /* ── LOADING / ERROR ── */
+  .loading {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+  }
+
+  .loading-spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 12px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-msg {
+    text-align: center;
+    padding: 30px 20px;
+    color: var(--red);
+    font-size: 13px;
+  }
+
+  .empty-msg {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  /* ── HEADER BAR ── */
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .page-header-title {
+    font-size: 18px;
+    font-weight: 700;
+  }
+
+  .refresh-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: color 0.2s;
+  }
+
+  .refresh-btn:active { color: var(--blue); }
+
+  /* ── MODAL ── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 200;
+    align-items: flex-end;
+    justify-content: center;
+  }
+
+  .modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 18px 18px 0 0;
+    padding: 20px 16px 32px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+
+  .modal-handle {
+    width: 40px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin: 0 auto 16px;
+  }
+
+  .modal-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    direction: ltr;
+    text-align: center;
+  }
+
+  .modal-close {
+    float: left;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 22px;
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  /* ── QUICK CHIPS ── */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-bottom: 12px;
+  }
+
+  .chip {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.15s;
+  }
+
+  .chip:active, .chip.selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* ── MACD bar colors ── */
+  .macd-pos { color: var(--green); }
+  .macd-neg { color: var(--red); }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav">
+  <button class="nav-btn active" onclick="showPage('watchlist', this)">
+    <span class="icon">📋</span>
+    <span>Watchlist</span>
+  </button>
+  <button class="nav-btn" onclick="showPage('screener', this)">
+    <span class="icon">🔍</span>
+    <span>סקרינר</span>
+  </button>
+  <button class="nav-btn" onclick="showPage('analysis', this)">
+    <span class="icon">📊</span>
+    <span>ניתוח</span>
+  </button>
+  <button class="nav-btn" onclick="showPage('feargreed', this)">
+    <span class="icon">😱</span>
+    <span>Fear&Greed</span>
+  </button>
+</nav>
+
+<!-- ═══════════════════════════════════════════
+     PAGE 1: WATCHLIST
+═══════════════════════════════════════════ -->
+<div id="page-watchlist" class="page active">
+  <div class="page-header">
+    <span class="page-header-title">📋 Watchlist</span>
+    <button class="refresh-btn" onclick="loadWatchlist()">⟳ רענן</button>
+  </div>
+  <div id="watchlist-content">
+    <div class="loading">
+      <div class="loading-spinner"></div>
+      <div>טוען נתונים…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     PAGE 2: SCREENER
+═══════════════════════════════════════════ -->
+<div id="page-screener" class="page">
+  <div class="page-header">
+    <span class="page-header-title">🔍 סקרינר</span>
+    <button class="refresh-btn" onclick="loadScreener()">⟳ רענן</button>
+  </div>
+  <div id="screener-content">
+    <div class="loading">
+      <div class="loading-spinner"></div>
+      <div>מריץ סקרינר…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     PAGE 3: ANALYSIS
+═══════════════════════════════════════════ -->
+<div id="page-analysis" class="page">
+  <div class="symbol-input-row">
+    <input id="analysis-input" class="symbol-input" type="text" placeholder="הכנס סימבול (AAPL)" maxlength="12"
+      onkeydown="if(event.key==='Enter') loadAnalysis()" />
+    <button class="btn-primary" onclick="loadAnalysis()">נתח</button>
+  </div>
+
+  <!-- quick chips -->
+  <div class="chips" id="quick-chips"></div>
+
+  <div id="analysis-content">
+    <div class="empty-msg">בחר מנייה לניתוח</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     PAGE 4: FEAR & GREED
+═══════════════════════════════════════════ -->
+<div id="page-feargreed" class="page">
+  <div class="page-header">
+    <span class="page-header-title">😱 Fear &amp; Greed Index</span>
+    <button class="refresh-btn" onclick="loadFearGreed()">⟳ רענן</button>
+  </div>
+  <div id="fg-content">
+    <div class="loading">
+      <div class="loading-spinner"></div>
+      <div>טוען…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ANALYSIS MODAL (from watchlist tap) -->
+<div id="modal-overlay" class="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal-body">
+    <div class="modal-handle"></div>
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════
+// TELEGRAM INIT
+// ══════════════════════════════════════════════
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+  document.documentElement.style.setProperty('--tg-bg', tg.colorScheme === 'dark' ? '#0d1117' : '#fff');
 }
 
-if rsi and rsi < 35: results["oversold"].append(entry) elif rsi and rsi> 70:
-    results["overbought"].append(entry)
+// ══════════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════════
+const pageLoaded = {};
 
-    if vol_ratio >= 2.0:
-    results["volume"].append(entry)
+function showPage(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  btn.classList.add('active');
 
-    if change >= 3.0 and vol_ratio >= 1.3:
-    results["breakouts"].append(entry)
+  if (!pageLoaded[name]) {
+    pageLoaded[name] = true;
+    if (name === 'watchlist') loadWatchlist();
+    if (name === 'screener') loadScreener();
+    if (name === 'feargreed') loadFearGreed();
+    if (name === 'analysis') buildQuickChips();
+  }
+}
 
-    return results
-    except Exception as e:
-    raise HTTPException(status_code=500, detail=str(e))
+// ══════════════════════════════════════════════
+// API HELPERS
+// ══════════════════════════════════════════════
+const BASE = '';
 
+async function apiFetch(path) {
+  const res = await fetch(BASE + path);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
-    @api.get("/api/analysis/{symbol}")
-    async def api_analysis(symbol: str):
-    """Returns full technical analysis for a symbol."""
-    symbol = symbol.upper()
-    try:
-    df = await asyncio.get_event_loop().run_in_executor(None, _fetch_daily, symbol)
-    if df is None or df.empty or len(df) < 5: raise HTTPException(status_code=404, detail=f"אין נתונים עבור {symbol}")
-        supports, resistances=_find_sr(df) closes=df["Close"].tolist() latest=float(df["Close"].iloc[-1])
-        prev=float(df["Close"].iloc[-2]) if len(df)> 1 else latest
-        change = (latest - prev) / prev * 100 if prev else 0
+function fmt(n, dec = 2) {
+  if (n == null) return '—';
+  return Number(n).toFixed(dec);
+}
 
-        # RSI
-        from analysis import _rsi, _macd, _bollinger, _sma
-        rsi_val = _rsi(closes)
+function changeClass(v) {
+  if (v > 0) return 'up';
+  if (v < 0) return 'down';
+  return 'neutral';
+}
 
-        # MACD
-        macd_val, signal_val, hist_val, _ = _macd(closes)
+function rsiClass(v) {
+  if (v == null) return 'rsi-norm';
+  if (v > 70) return 'rsi-hot';
+  if (v < 30) return 'rsi-cold';
+  return 'rsi-norm';
+}
 
-        # Bollinger
-        bb_upper, bb_mid, bb_lower = _bollinger(closes)
+function rsiLabel(v) {
+  if (v == null) return '—';
+  if (v > 70) return `<span class="rsi-badge rsi-hot">RSI ${fmt(v,0)}</span>`;
+  if (v < 30) return `<span class="rsi-badge rsi-cold">RSI ${fmt(v,0)}</span>`;
+  return `<span class="rsi-badge rsi-norm">RSI ${fmt(v,0)}</span>`;
+}
 
-        # MA50 / MA200
-        ma50_cur, _ = _sma(closes, 50)
-        ma200_cur, _ = _sma(closes, 200)
+// ══════════════════════════════════════════════
+// PAGE 1 — WATCHLIST
+// ══════════════════════════════════════════════
+async function loadWatchlist() {
+  const el = document.getElementById('watchlist-content');
+  el.innerHTML = `<div class="loading"><div class="loading-spinner"></div><div>טוען נתונים…</div></div>`;
+  try {
+    const data = await apiFetch('/api/watchlist');
+    const symbols = data.symbols || [];
 
-        # Recent candles for chart data (last 30)
-        candles = []
-        df_recent = df.tail(30)
-        for idx, row in df_recent.iterrows():
-        candles.append({
-        "date": idx.strftime("%d/%m"),
-        "open": round(float(row["Open"]), 2),
-        "high": round(float(row["High"]), 2),
-        "low": round(float(row["Low"]), 2),
-        "close": round(float(row["Close"]), 2),
-        "volume": int(row["Volume"]),
-        })
+    if (!symbols.length) {
+      el.innerHTML = `<div class="empty-msg">אין מניות ב-Watchlist</div>`;
+      return;
+    }
 
-        return {
-        "symbol": symbol,
-        "price": round(latest, 2),
-        "change": round(change, 2),
-        "rsi": round(rsi_val, 1) if rsi_val else None,
-        "macd": round(macd_val, 3) if macd_val else None,
-        "macd_signal": round(signal_val, 3) if signal_val else None,
-        "macd_hist": round(hist_val, 3) if hist_val else None,
-        "bb_upper": round(bb_upper, 2) if bb_upper else None,
-        "bb_mid": round(bb_mid, 2) if bb_mid else None,
-        "bb_lower": round(bb_lower, 2) if bb_lower else None,
-        "ma50": round(ma50_cur, 2) if ma50_cur else None,
-        "ma200": round(ma200_cur, 2) if ma200_cur else None,
-        "supports": [round(s, 2) for s in supports[:3]],
-        "resistances": [round(r, 2) for r in resistances[:3]],
-        "candles": candles,
+    el.innerHTML = `<div class="card">` +
+      symbols.map(s => {
+        const chg = s.change ?? 0;
+        const cls = changeClass(chg);
+        const sign = chg >= 0 ? '+' : '';
+        return `<div class="stock-row" onclick="openAnalysisModal('${s.symbol}')">
+          <div class="stock-symbol">${s.symbol}</div>
+          <div class="stock-price">$${fmt(s.price)}</div>
+          <div class="stock-rsi">${rsiLabel(s.rsi)}</div>
+          <div class="stock-change ${cls}">${sign}${fmt(chg,1)}%</div>
+        </div>`;
+      }).join('') +
+    `</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="error-msg">⚠️ שגיאה בטעינה<br><small>${e.message}</small></div>`;
+  }
+}
+
+// ══════════════════════════════════════════════
+// PAGE 2 — SCREENER
+// ══════════════════════════════════════════════
+async function loadScreener() {
+  const el = document.getElementById('screener-content');
+  el.innerHTML = `<div class="loading"><div class="loading-spinner"></div><div>מריץ סקרינר…</div></div>`;
+  try {
+    const data = await apiFetch('/api/screener');
+
+    let html = '';
+
+    html += renderScreenerSection('🚀 פריצות (Breakouts)', data.breakouts || [], s =>
+      `<div>${s.symbol}</div><div class="screener-detail">+${fmt(s.change,1)}% | נפח x${fmt(s.vol_ratio,1)}</div>`,
+      'badge-green', v => `+${fmt(v.change,1)}%`
+    );
+
+    html += renderScreenerSection('📊 נפח חריג', data.volume || [], s =>
+      `<div>${s.symbol}</div><div class="screener-detail">$${fmt(s.price)} | נפח x${fmt(s.vol_ratio,1)}</div>`,
+      'badge-blue', v => `x${fmt(v.vol_ratio,1)}`
+    );
+
+    html += renderScreenerSection('🔥 Oversold (RSI < 35)', data.oversold || [], s =>
+      `<div>${s.symbol}</div><div class="screener-detail">$${fmt(s.price)} | ${fmt(s.change,1)}%</div>`,
+      'badge-green', v => `RSI ${fmt(v.rsi,0)}`
+    );
+
+    html += renderScreenerSection('⚠️ Overbought (RSI > 70)', data.overbought || [], s =>
+      `<div>${s.symbol}</div><div class="screener-detail">$${fmt(s.price)} | ${fmt(s.change,1)}%</div>`,
+      'badge-red', v => `RSI ${fmt(v.rsi,0)}`
+    );
+
+    el.innerHTML = html || `<div class="empty-msg">אין תוצאות כרגע</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="error-msg">⚠️ שגיאה<br><small>${e.message}</small></div>`;
+  }
+}
+
+function renderScreenerSection(title, items, rowFn, badgeClass, badgeFn) {
+  if (!items.length) return '';
+  return `
+    <div class="section-title">${title}</div>
+    ${items.map(s => `
+      <div class="screener-item" onclick="openAnalysisModal('${s.symbol}')">
+        <div class="screener-sym">${rowFn(s)}</div>
+        <div class="screener-badge ${badgeClass}">${badgeFn(s)}</div>
+      </div>
+    `).join('')}
+  `;
+}
+
+// ══════════════════════════════════════════════
+// PAGE 3 — ANALYSIS
+// ══════════════════════════════════════════════
+let candleChart = null;
+let currentWatchlistSymbols = [];
+
+function buildQuickChips() {
+  // Will be populated after watchlist loads
+  const saved = JSON.parse(localStorage.getItem('recentSymbols') || '[]');
+  const defaults = ['AAPL','NVDA','TSLA','PLTR','NNE','META','MARA','COIN'];
+  const chips = [...new Set([...saved, ...defaults])].slice(0, 12);
+  document.getElementById('quick-chips').innerHTML = chips.map(s =>
+    `<span class="chip" onclick="selectChip('${s}')">${s}</span>`
+  ).join('');
+}
+
+function selectChip(sym) {
+  document.getElementById('analysis-input').value = sym;
+  loadAnalysis();
+}
+
+async function loadAnalysis() {
+  const sym = document.getElementById('analysis-input').value.trim().toUpperCase();
+  if (!sym) return;
+
+  // Save to recent
+  const recent = JSON.parse(localStorage.getItem('recentSymbols') || '[]');
+  const updated = [sym, ...recent.filter(s => s !== sym)].slice(0, 6);
+  localStorage.setItem('recentSymbols', JSON.stringify(updated));
+  buildQuickChips();
+
+  const el = document.getElementById('analysis-content');
+  el.innerHTML = `<div class="loading"><div class="loading-spinner"></div><div>מנתח ${sym}…</div></div>`;
+
+  try {
+    const d = await apiFetch(`/api/analysis/${sym}`);
+    renderAnalysis(el, d);
+  } catch (e) {
+    el.innerHTML = `<div class="error-msg">⚠️ שגיאה עבור ${sym}<br><small>${e.message}</small></div>`;
+  }
+}
+
+function renderAnalysis(el, d) {
+  const chg = d.change ?? 0;
+  const cls = changeClass(chg);
+  const sign = chg >= 0 ? '+' : '';
+
+  let macdColor = '';
+  if (d.macd_hist != null) macdColor = d.macd_hist >= 0 ? 'macd-pos' : 'macd-neg';
+
+  const supHtml = (d.supports || []).map(v => `<div class="level-item" style="color:var(--green)">$${fmt(v)}</div>`).join('') || '<div class="level-item">—</div>';
+  const resHtml = (d.resistances || []).map(v => `<div class="level-item" style="color:var(--red)">$${fmt(v)}</div>`).join('') || '<div class="level-item">—</div>';
+
+  el.innerHTML = `
+    <!-- Header -->
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:22px;font-weight:800;direction:ltr">${d.symbol}</div>
+          <div style="font-size:12px;color:var(--text-muted)">מחיר נוכחי</div>
+        </div>
+        <div style="text-align:left">
+          <div style="font-size:22px;font-weight:800">$${fmt(d.price)}</div>
+          <div class="${cls}" style="font-size:14px;font-weight:600;padding:3px 8px;border-radius:5px">${sign}${fmt(chg,2)}%</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="card">
+      <div class="card-title">גרף נרות — 30 ימים</div>
+      <div class="chart-container">
+        <canvas id="candle-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- Indicators -->
+    <div class="indicators-grid">
+      <div class="indicator-card">
+        <div class="indicator-label">RSI (14)</div>
+        <div class="indicator-value ${rsiClass(d.rsi)}" style="color:${d.rsi > 70 ? 'var(--red)' : d.rsi < 30 ? 'var(--green)' : 'var(--text)'}">${fmt(d.rsi, 1)}</div>
+        <div class="indicator-sub">${d.rsi > 70 ? '⚠️ Overbought' : d.rsi < 30 ? '🔥 Oversold' : 'נייטרלי'}</div>
+      </div>
+
+      <div class="indicator-card">
+        <div class="indicator-label">MACD</div>
+        <div class="indicator-value ${macdColor}">${fmt(d.macd, 3)}</div>
+        <div class="indicator-sub">Signal: ${fmt(d.macd_signal, 3)}</div>
+      </div>
+
+      <div class="indicator-card">
+        <div class="indicator-label">Bollinger Bands</div>
+        <div style="font-size:12px;color:var(--red);font-weight:600">⬆ $${fmt(d.bb_upper)}</div>
+        <div style="font-size:12px;color:var(--text-muted)">— $${fmt(d.bb_mid)}</div>
+        <div style="font-size:12px;color:var(--green);font-weight:600">⬇ $${fmt(d.bb_lower)}</div>
+      </div>
+
+      <div class="indicator-card">
+        <div class="indicator-label">Moving Averages</div>
+        <div style="font-size:12px;color:var(--blue);font-weight:600">MA50: $${fmt(d.ma50)}</div>
+        <div style="font-size:12px;color:var(--purple);font-weight:600">MA200: $${fmt(d.ma200)}</div>
+        <div class="indicator-sub">${d.ma50 && d.ma200 ? (d.ma50 > d.ma200 ? '✅ Golden Cross' : '⚠️ Death Cross') : ''}</div>
+      </div>
+    </div>
+
+    <!-- Levels -->
+    <div class="levels-row">
+      <div class="level-block">
+        <div class="level-block-title" style="color:var(--green)">🛡️ תמיכות</div>
+        ${supHtml}
+      </div>
+      <div class="level-block">
+        <div class="level-block-title" style="color:var(--red)">🔺 התנגדויות</div>
+        ${resHtml}
+      </div>
+    </div>
+  `;
+
+  // Draw chart
+  if (d.candles && d.candles.length) {
+    drawCandleChart(d.candles, d.supports || [], d.resistances || []);
+  }
+}
+
+function drawCandleChart(candles, supports, resistances) {
+  if (candleChart) { candleChart.destroy(); candleChart = null; }
+
+  const ctx = document.getElementById('candle-chart')?.getContext('2d');
+  if (!ctx) return;
+
+  const labels = candles.map(c => c.date);
+  const closes = candles.map(c => c.close);
+  const opens  = candles.map(c => c.open);
+  const highs  = candles.map(c => c.high);
+  const lows   = candles.map(c => c.low);
+
+  // Simple line chart with gradient since financial plugin may not load
+  const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+  gradient.addColorStop(0, 'rgba(88,166,255,0.3)');
+  gradient.addColorStop(1, 'rgba(88,166,255,0.02)');
+
+  const barColors = candles.map(c => c.close >= c.open ? 'rgba(63,185,80,0.85)' : 'rgba(248,81,73,0.85)');
+
+  candleChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Close',
+          data: closes,
+          backgroundColor: barColors,
+          borderColor: barColors,
+          borderWidth: 1,
+          borderRadius: 2,
+          categoryPercentage: 0.7,
+          barPercentage: 0.85,
+        },
+        {
+          label: 'High/Low',
+          data: candles.map(c => ({ x: c.date, y: [c.low, c.high] })),
+          type: 'bar',
+          backgroundColor: barColors.map(c => c.replace('0.85', '0.4')),
+          categoryPercentage: 0.25,
+          barPercentage: 1,
+          hidden: false,
         }
-        except HTTPException:
-        raise
-        except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-        @api.post("/api/watchlist/add")
-        async def api_watchlist_add(req: SymbolRequest):
-        symbol = req.symbol.upper().strip()
-        if symbol in _dynamic_watchlist:
-        return {"ok": True, "watchlist": _dynamic_watchlist}
-        _dynamic_watchlist.append(symbol)
-        save_setting("dynamic_watchlist", ",".join(_dynamic_watchlist))
-        return {"ok": True, "watchlist": _dynamic_watchlist}
-
-
-        @api.post("/api/watchlist/remove")
-        async def api_watchlist_remove(req: SymbolRequest):
-        symbol = req.symbol.upper().strip()
-        if symbol in _dynamic_watchlist:
-        _dynamic_watchlist.remove(symbol)
-        save_setting("dynamic_watchlist", ",".join(_dynamic_watchlist))
-        return {"ok": True, "watchlist": _dynamic_watchlist}
-
-
-        @api.get("/api/fear_greed")
-        async def api_fear_greed():
-        try:
-        from analysis import fetch_fear_greed
-        data = await asyncio.get_event_loop().run_in_executor(None, fetch_fear_greed)
-        return data
-        except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-        # Serve Mini App static files
-        api.mount("/", StaticFiles(directory="miniapp", html=True), name="miniapp")
-
-
-        # ─────────────────────────────────────────────────────────────
-        # Helpers
-        # ─────────────────────────────────────────────────────────────
-
-        def format_alert(alert: Alert) -> str:
-        sup = f"${alert.support:.2f}" if alert.support else "—"
-        res = f"${alert.resistance:.2f}" if alert.resistance else "—"
-        return (
-        f"🚨 *{alert.symbol}* — {alert.title}\n"
-        f"💵 מחיר נוכחי: ${alert.price:.2f}\n"
-        f"📊 מה קרה: {alert.description}\n"
-        f"🎯 רמות חשובות: תמיכה {sup} / התנגדות {res}\n"
-        f"⚡ המלצה: {alert.recommendation}"
-        )
-
-
-        def format_sr_alert(alert: Alert) -> str:
-        level_type = "תמיכה" if "sup" in alert.key else "התנגדות"
-        level_price = alert.support if "sup" in alert.key else alert.resistance
-        dist_pct = abs(alert.price - level_price) / alert.price * 100 if level_price else 0
-        return (
-        f"📊 *{alert.symbol}* מתקרב ל{level_type} ב-${level_price:.2f}\n"
-        f"💵 מחיר נוכחי: ${alert.price:.2f}\n"
-        f"📉 מרחק: {dist_pct:.1f}% מה{level_type}\n"
-        f"⚡ שים לב — {alert.recommendation}"
-        )
-
-
-        def is_market_hours() -> bool:
-        now = datetime.now(EST_TZ)
-        if now.weekday() >= 5:
-        return False
-        open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        return open_t <= now <=close_t # ───────────────────────────────────────────────────────────── # Scanner #
-            ───────────────────────────────────────────────────────────── async def run_scan(app: Application) -> None:
-            global OWNER_CHAT_ID
-            if OWNER_CHAT_ID is None:
-            log.info("No owner chat_id — skipping scan")
-            return
-            if alerts_paused:
-            log.info("Alerts paused — skipping scan")
-            return
-
-            log.info("Scanning %d symbols…", len(_dynamic_watchlist))
-            sent = 0
-
-            for symbol in _dynamic_watchlist:
-            try:
-            _MUTED_KEYS = (
-            "rsi_oversold", "rsi_overbought",
-            "macd_bullish", "macd_bearish",
-            "bb_upper_break", "bb_lower_break",
-            "golden_cross", "death_cross",
-            "vwap_cross_up", "vwap_cross_down",
-            )
-            for alert in analyze_symbol(symbol):
-            if any(alert.key.startswith(k) for k in _MUTED_KEYS):
-            continue
-            if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
-            continue
-            save_alert(symbol, alert.key)
-            await app.bot.send_message(
-            chat_id=OWNER_CHAT_ID,
-            text=format_alert(alert),
-            parse_mode="Markdown",
-            )
-            sent += 1
-            await asyncio.sleep(0.4)
-
-            if is_market_hours():
-            for alert in check_sr_proximity(symbol):
-            if is_alert_recent(symbol, alert.key, alert.cooldown_hours):
-            continue
-            save_alert(symbol, alert.key)
-            await app.bot.send_message(
-            chat_id=OWNER_CHAT_ID,
-            text=format_sr_alert(alert),
-            parse_mode="Markdown",
-            )
-            sent += 1
-            await asyncio.sleep(0.4)
-
-            await asyncio.sleep(1.5)
-            except Exception as exc:
-            log.error("Scan error %s: %s", symbol, exc)
-
-            log.info("Scan done — %d alerts sent", sent)
-
-
-            async def scan_loop(app: Application) -> None:
-            await asyncio.sleep(20)
-            while True:
-            try:
-            await run_scan(app)
-            except Exception as exc:
-            log.error("scan_loop error: %s", exc)
-            in_market = is_market_hours()
-            sleep_secs = 3600 if in_market else 14400
-            log.info("Next scan in %.0f min (market_hours=%s)", sleep_secs / 60, in_market)
-            await asyncio.sleep(sleep_secs)
-
-
-            def _seconds_until_utc(hour: int, minute: int) -> float:
-            import pytz as _pytz
-            tz = _pytz.utc
-            now = datetime.now(tz)
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now: from datetime import timedelta target +=timedelta(days=1) return (target -
-                now).total_seconds() def _seconds_until_time(hour: int, minute: int) -> float:
-                import pytz as _pytz
-                tz = _pytz.timezone("Asia/Jerusalem")
-                now = datetime.now(tz)
-                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if target <= now: from datetime import timedelta target +=timedelta(days=1) return (target -
-                    now).total_seconds() async def morning_news_loop(app: Application) -> None:
-                    while True:
-                    secs = _seconds_until_utc(6, 0)
-                    log.info("Morning news scheduled in %.0f min", secs / 60)
-                    await asyncio.sleep(secs)
-                    if OWNER_CHAT_ID is None:
-                    await asyncio.sleep(60)
-                    continue
-                    try:
-                    msg = await asyncio.get_event_loop().run_in_executor(None, build_morning_message)
-                    await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
-                    except Exception as exc:
-                    log.error("morning_news_loop error: %s", exc)
-                    await asyncio.sleep(61)
-
-
-                    async def screener_loop(app: Application) -> None:
-                    while True:
-                    await asyncio.sleep(_seconds_until_time(9, 0))
-                    if OWNER_CHAT_ID is None:
-                    await asyncio.sleep(60)
-                    continue
-                    try:
-                    msg = await asyncio.get_event_loop().run_in_executor(None, build_screener_message)
-                    await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
-                    except Exception as exc:
-                    log.error("screener_loop error: %s", exc)
-                    await asyncio.sleep(61)
-
-
-                    async def earnings_loop(app: Application) -> None:
-                    while True:
-                    await asyncio.sleep(_seconds_until_time(8, 30))
-                    if OWNER_CHAT_ID is None:
-                    await asyncio.sleep(60)
-                    continue
-                    try:
-                    messages = await asyncio.get_event_loop().run_in_executor(None, build_earnings_messages)
-                    for msg in messages:
-                    symbol = msg.split("*")[1] if "*" in msg else "earnings"
-                    key = f"earnings_{symbol}_{datetime.now().strftime('%Y%m%d')}"
-                    if is_alert_recent(symbol, key, 24):
-                    continue
-                    save_alert(symbol, key)
-                    await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown")
-                    await asyncio.sleep(0.4)
-                    except Exception as exc:
-                    log.error("earnings_loop error: %s", exc)
-                    await asyncio.sleep(61)
-
-
-                    async def setup_scan_loop(app: Application) -> None:
-                    await asyncio.sleep(30)
-                    while True:
-                    try:
-                    if OWNER_CHAT_ID is not None and not alerts_paused and is_market_hours():
-                    sent = 0
-                    for symbol in _dynamic_watchlist:
-                    try:
-                    setups = await asyncio.get_event_loop().run_in_executor(
-                    None, get_active_setups, symbol
-                    )
-                    for s in setups:
-                    key = f"setup_{symbol}_{s['name'].split()[0].lower()}"
-                    if is_alert_recent(symbol, key, 12):
-                    continue
-                    save_alert(symbol, key)
-                    dist_pct = (s["entry"] - s["price"]) / s["price"] * 100
-                    vol_note = f"גבוה x{s['vol_ratio']:.1f} — מחזק את הסט-אפ ⚡" if s["vol_ratio"] >= 1.5 else "תקין"
-                    text = (
-                    f"🚨 *סט-אפ מזוהה — {symbol}!*\n\n"
-                    f"📊 פטרן: {s['name']}\n"
-                    f"💵 מחיר נוכחי: ${s['price']:.2f}\n"
-                    f"🎯 נקודת פריצה: ${s['entry']:.2f} ({dist_pct:+.1f}%)\n"
-                    f"📈 יעד אחרי פריצה: ${s['target']:.2f}\n"
-                    f"🛑 סטופ מומלץ: ${s['stop']:.2f}\n"
-                    f"📊 נפח: {vol_note}\n\n"
-                    f"📌 סיבה: {s['reason']}"
-                    )
-                    await app.bot.send_message(
-                    chat_id=OWNER_CHAT_ID, text=text, parse_mode="Markdown"
-                    )
-                    sent += 1
-                    await asyncio.sleep(0.4)
-                    await asyncio.sleep(1.0)
-                    except Exception as exc:
-                    log.warning("setup_scan error %s: %s", symbol, exc)
-                    except Exception as exc:
-                    log.error("setup_scan_loop error: %s", exc)
-                    await asyncio.sleep(3600)
-
-
-                    # ─────────────────────────────────────────────────────────────
-                    # Command handlers
-                    # ─────────────────────────────────────────────────────────────
-
-                    async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-                    global OWNER_CHAT_ID
-                    OWNER_CHAT_ID = update.effective_chat.id
-                    save_setting("chat_id", str(OWNER_CHAT_ID))
-
-                    mini_app_url = f"https://trading-bot-production-5207.up.railway.app"
-                    symbols_str = " | ".join(_dynamic_watchlist)
-                    text = (
-                    "📈 *בוט מסחר סווינג — פעיל!*\n\n"
-                    f"🔍 מנטר *{len(_dynamic_watchlist)} מניות:*\n"
-                    f"`{symbols_str}`\n\n"
-                    "⏰ *תדירות סריקה:*\n"
-                    " • שעות מסחר (09:30‑16:00 EST): כל שעה\n"
-                    " • לילה / סוף שבוע: כל 4 שעות\n\n"
-                    "📱 *Dashboard:* לחץ על הכפתור למטה\n\n"
-                    "📋 *פקודות:*\n"
-                    " /status — מחירים נוכחיים + RSI\n"
-                    " /analysis AAPL — ניתוח מלא\n"
-                    " /levels AAPL — תמיכות והתנגדויות\n"
-                    " /chart AAPL — גרף נרות 30 ימים\n"
-                    " /stop — השהה התראות\n"
-                    " /resume — חדש התראות"
-                    )
-
-                    keyboard = ReplyKeyboardMarkup(
-                    keyboard=[
-                    [KeyboardButton("📱 פתח Dashboard", web_app={"url": mini_app_url})],
-                    [KeyboardButton("📈 סטטוס"), KeyboardButton("🔍 סקרינר")],
-                    [KeyboardButton("📊 גרף"), KeyboardButton("🎯 סט-אפים")],
-                    [KeyboardButton("📉 BB"), KeyboardButton("⚡ VWAP")],
-                    [KeyboardButton("📐 פיבונאצ'י"), KeyboardButton("🔎 ניתוח")],
-                    [KeyboardButton("☁️ Ichimoku"), KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
-                    [KeyboardButton("💹 OBV"), KeyboardButton("🛑 Stop Loss")],
-                    [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
-                    ],
-                    resize_keyboard=True,
-                    )
-                    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
-
-
-                    async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-                    await update.message.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
-                    data = get_quick_status()
-                    lines = ["📊 *סטטוס מניות נוכחי*\n"]
-                    for d in data:
-                    if d["price"] is None:
-                    lines.append(f" ❌ {d['symbol']:6s} — שגיאה")
-                    continue
-                    chg = d["change"]
-                    rsi = d["rsi"]
-                    arrow = "🟢" if chg >= 0 else "🔴"
-                    chg_s = f"{'+'if chg>=0 else ''}{chg:.1f}%"
-                    rsi_s = f"RSI {rsi:.0f}" if rsi is not None else " "
-                    flag = (" 🔥" if rsi < 30 else " ⚠️" if rsi> 70 else "") if rsi else ""
-                        lines.append(f" {arrow} {d['symbol']:6s} ${d['price']:8.2f} {chg_s:>7} {rsi_s}{flag}")
-                        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-                        async def cmd_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                        symbol = " ".join(context.args).upper().strip()
-                        if not symbol:
-                        await update.message.reply_text("שלח: /analysis NNE")
-                        return
-                        await update.message.reply_text(f"⏳ מנתח את {symbol}…")
-                        await update.message.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
-
-
-                        async def cmd_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                        symbol = " ".join(context.args).upper().strip()
-                        if not symbol:
-                        await update.message.reply_text("שלח: /levels NNE")
-                        return
-                        await update.message.reply_text(f"⏳ מחשב רמות עבור {symbol}…")
-                        await update.message.reply_text(get_levels(symbol), parse_mode="Markdown")
-
-
-                        async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                        symbol = " ".join(context.args).upper().strip()
-                        if not symbol:
-                        await update.message.reply_text("שלח: /chart NNE")
-                        return
-                        msg = await update.message.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
-                        try:
-                        df = _fetch_daily(symbol)
-                        if df.empty or len(df) < 5: await msg.edit_text(f"❌ אין מספיק נתונים עבור {symbol}") return
-                            supports, resistances=_find_sr(df) buf=await asyncio.get_event_loop().run_in_executor( None,
-                            build_chart, symbol, df, supports, resistances ) caption=( f"📈 *{symbol}* — 30 ימים
-                            אחרונים\n" f"🛡️ תמיכות: {', '.join(f' ${s:.2f}' for s in supports[:3]) or '—' }\n" f"🔺
-                            התנגדויות: {', '.join(f' ${r:.2f}' for r in resistances[:3]) or '—' }" ) await
-                            update.message.reply_photo(photo=buf, caption=caption, parse_mode="Markdown" ) await
-                            msg.delete() except Exception as exc: log.error("Chart error %s: %s", symbol, exc) await
-                            msg.edit_text(f"❌ שגיאה ביצירת גרף עבור {symbol}: {exc}") async def cmd_bb(update: Update,
-                            context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /bb NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב Bollinger Bands עבור {symbol}…")
-                            await update.message.reply_text(get_bollinger_levels(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_fib(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /fib NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב רמות פיבונאצ'י עבור {symbol}…")
-                            await update.message.reply_text(get_fibonacci_levels(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_vwap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /vwap NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב VWAP עבור {symbol}…")
-                            await update.message.reply_text(get_vwap(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_ichimoku(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /ichimoku NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב Ichimoku Cloud עבור {symbol}…")
-                            result = await asyncio.get_event_loop().run_in_executor(None, get_ichimoku, symbol)
-                            await update.message.reply_text(result, parse_mode="Markdown")
-
-
-                            async def cmd_stoch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /stoch NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב Stochastic RSI עבור {symbol}…")
-                            await update.message.reply_text(get_stoch_rsi(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_pivot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /pivot NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב Pivot Points עבור {symbol}…")
-                            await update.message.reply_text(get_pivot_points(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_obv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /obv NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב OBV עבור {symbol}…")
-                            await update.message.reply_text(get_obv(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_atr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            symbol = " ".join(context.args).upper().strip()
-                            if not symbol:
-                            await update.message.reply_text("שלח: /atr NNE")
-                            return
-                            await update.message.reply_text(f"⏳ מחשב ATR עבור {symbol}…")
-                            await update.message.reply_text(get_atr(symbol), parse_mode="Markdown")
-
-
-                            async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                            if len(context.args) < 2: await update.message.reply_text("שלח: /stoploss NNE 45.50") return
-                                symbol=context.args[0].upper().strip() try: entry=float(context.args[1]) except
-                                ValueError: await update.message.reply_text("❌ מחיר כניסה לא תקין.") return await
-                                update.message.reply_text(f"⏳ מחשב Stop Loss עבור {symbol}…") result=await
-                                asyncio.get_event_loop().run_in_executor(None, get_stoploss, symbol, entry) await
-                                update.message.reply_text(result, parse_mode="Markdown" ) async def cmd_stop(update:
-                                Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-                                global alerts_paused
-                                alerts_paused = True
-                                await update.message.reply_text("⏸️ התראות הושהו. שלח /resume להמשך.")
-
-
-                                async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-                                global alerts_paused
-                                alerts_paused = False
-                                await update.message.reply_text("▶️ התראות חודשו!")
-
-
-                                # ─────────────────────────────────────────────────────────────
-                                # Keyboards
-                                # ─────────────────────────────────────────────────────────────
-
-                                PENDING_KEY = "pending_action"
-
-                                MAIN_KEYBOARD = ReplyKeyboardMarkup(
-                                keyboard=[
-                                [KeyboardButton("📈 סטטוס"), KeyboardButton("🔍 סקרינר")],
-                                [KeyboardButton("📊 גרף"), KeyboardButton("🎯 סט-אפים")],
-                                [KeyboardButton("📉 BB"), KeyboardButton("⚡ VWAP")],
-                                [KeyboardButton("📐 פיבונאצ'י"), KeyboardButton("🔎 ניתוח")],
-                                [KeyboardButton("☁️ Ichimoku"), KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐
-                                Pivot")],
-                                [KeyboardButton("💹 OBV"), KeyboardButton("🛑 Stop Loss")],
-                                [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
-                                ],
-                                resize_keyboard=True,
-                                )
-
-                                _SYMBOLS_ROWS = [
-                                ["NNE", "MARA", "PLTR", "IREN"],
-                                ["SOFI", "AAPL", "NVDA", "TSLA"],
-                                ["CIFR", "HOOD", "MSFT", "OKLO"],
-                                ["SMR", "RKLB", "COIN", "RIOT"],
-                                ["AMD", "META", "GOOGL","AMZN"],
-                                ["BTC-USD", "ETH-USD"],
-                                ]
-
-                                def build_symbol_picker(action_prefix: str) -> InlineKeyboardMarkup:
-                                rows = [
-                                [InlineKeyboardButton(sym, callback_data=f"{action_prefix}:{sym}") for sym in row]
-                                for row in _SYMBOLS_ROWS
-                                ]
-                                return InlineKeyboardMarkup(rows)
-
-                                def build_more_keyboard() -> InlineKeyboardMarkup:
-                                return InlineKeyboardMarkup([
-                                [
-                                InlineKeyboardButton("📅 Earnings", callback_data="more:earnings"),
-                                InlineKeyboardButton("🔔 רמות", callback_data="more:levels"),
-                                ],
-                                [
-                                InlineKeyboardButton("📰 חדשות", callback_data="more:news"),
-                                InlineKeyboardButton("❓ עזרה", callback_data="more:help"),
-                                ],
-                                ])
-
-                                SYMBOL_ACTIONS = {
-                                "📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🎯 סט-אפים", "🔎 ניתוח",
-                                "☁️ Ichimoku", "📉 Stoch RSI", "📐 Pivot", "💹 OBV", "🛑 Stop Loss",
-                                }
-
-                                _ACTION_PREFIX = {
-                                "📊 גרף": "chart",
-                                "📐 פיבונאצ'י": "fib",
-                                "📉 BB": "bb",
-                                "⚡ VWAP": "vwap",
-                                "🎯 סט-אפים": "setups",
-                                "🔎 ניתוח": "richanalysis",
-                                "☁️ Ichimoku": "ichimoku",
-                                "📉 Stoch RSI": "stoch",
-                                "📐 Pivot": "pivot",
-                                "💹 OBV": "obv",
-                                "🛑 Stop Loss": "stoploss",
-                                }
-
-
-                                async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-                                await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
-
-
-                                # ─────────────────────────────────────────────────────────────
-                                # Shared action executor
-                                # ─────────────────────────────────────────────────────────────
-
-                                async def _send_status(msg) -> None:
-                                await msg.reply_text("⏳ מושך נתונים… (20‑40 שניות)")
-                                data_list = get_quick_status()
-                                lines = ["📊 *סטטוס מניות נוכחי*\n"]
-                                for d in data_list:
-                                if d["price"] is None:
-                                lines.append(f" ❌ {d['symbol']:6s} — שגיאה")
-                                continue
-                                chg = d["change"]
-                                rsi = d["rsi"]
-                                arrow = "🟢" if chg >= 0 else "🔴"
-                                chg_s = f"{'+'if chg>=0 else ''}{chg:.1f}%"
-                                rsi_s = f"RSI {rsi:.0f}" if rsi is not None else " "
-                                flag = (" 🔥" if rsi < 30 else " ⚠️" if rsi> 70 else "") if rsi else ""
-                                    lines.append(f" {arrow} {d['symbol']:6s} ${d['price']:8.2f} {chg_s:>7}
-                                    {rsi_s}{flag}")
-                                    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-                                    async def _run_symbol_action(action: str, symbol: str, msg,
-                                    ctx: ContextTypes.DEFAULT_TYPE | None = None) -> None:
-                                    if action == "chart":
-                                    loading = await msg.reply_text(f"⏳ מייצר גרף עבור {symbol}…")
-                                    try:
-                                    df = _fetch_daily(symbol)
-                                    if df.empty or len(df) < 5: await loading.edit_text(f"❌ אין מספיק נתונים עבור
-                                        {symbol}") return supports, resistances=_find_sr(df) buf=await
-                                        asyncio.get_event_loop().run_in_executor( None, build_chart, symbol, df,
-                                        supports, resistances ) caption=( f"📈 *{symbol}* — 30 ימים אחרונים\n" f"🛡️
-                                        תמיכות: {', '.join(f' ${s:.2f}' for s in supports[:3]) or '—' }\n" f"🔺
-                                        התנגדויות: {', '.join(f' ${r:.2f}' for r in resistances[:3]) or '—' }" ) await
-                                        msg.reply_photo(photo=buf, caption=caption, parse_mode="Markdown" ) await
-                                        loading.delete() except Exception as exc: await loading.edit_text(f"❌ שגיאה:
-                                        {exc}") elif action=="fib" : await msg.reply_text(f"⏳ מחשב רמות פיבונאצ'י עבור
-                                        {symbol}…") await msg.reply_text(get_fibonacci_levels(symbol),
-                                        parse_mode="Markdown" ) elif action=="bb" : await msg.reply_text(f"⏳ מחשב
-                                        Bollinger Bands עבור {symbol}…") await
-                                        msg.reply_text(get_bollinger_levels(symbol), parse_mode="Markdown" ) elif
-                                        action=="vwap" : await msg.reply_text(f"⏳ מחשב VWAP עבור {symbol}…") await
-                                        msg.reply_text(get_vwap(symbol), parse_mode="Markdown" ) elif action=="levels" :
-                                        await msg.reply_text(f"⏳ מחשב רמות עבור {symbol}…") await
-                                        msg.reply_text(get_levels(symbol), parse_mode="Markdown" ) elif
-                                        action=="analysis" : await msg.reply_text(f"⏳ מנתח את {symbol}…") await
-                                        msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown" ) elif
-                                        action=="setups" : await msg.reply_text(f"⏳ מחפש סט-אפים עבור {symbol}…")
-                                        result=await asyncio.get_event_loop().run_in_executor(None,
-                                        build_setups_message, symbol) await msg.reply_text(result, parse_mode="Markdown"
-                                        ) elif action=="richanalysis" : await msg.reply_text(f"⏳ מנתח את {symbol}…")
-                                        result=await asyncio.get_event_loop().run_in_executor(None, get_rich_analysis,
-                                        symbol) await msg.reply_text(result, parse_mode="Markdown" ) elif
-                                        action=="ichimoku" : await msg.reply_text(f"⏳ מחשב Ichimoku Cloud עבור
-                                        {symbol}…") result=await asyncio.get_event_loop().run_in_executor(None,
-                                        get_ichimoku, symbol) await msg.reply_text(result, parse_mode="Markdown" ) elif
-                                        action=="stoch" : await msg.reply_text(f"⏳ מחשב Stochastic RSI עבור {symbol}…")
-                                        result=await asyncio.get_event_loop().run_in_executor(None, get_stoch_rsi,
-                                        symbol) await msg.reply_text(result, parse_mode="Markdown" ) elif
-                                        action=="pivot" : await msg.reply_text(f"⏳ מחשב Pivot Points עבור {symbol}…")
-                                        result=await asyncio.get_event_loop().run_in_executor(None, get_pivot_points,
-                                        symbol) await msg.reply_text(result, parse_mode="Markdown" ) elif action=="obv"
-                                        : await msg.reply_text(f"⏳ מחשב OBV עבור {symbol}…") result=await
-                                        asyncio.get_event_loop().run_in_executor(None, get_obv, symbol) await
-                                        msg.reply_text(result, parse_mode="Markdown" ) elif action=="atr" : await
-                                        msg.reply_text(f"⏳ מחשב ATR עבור {symbol}…") result=await
-                                        asyncio.get_event_loop().run_in_executor(None, get_atr, symbol) await
-                                        msg.reply_text(result, parse_mode="Markdown" ) elif action=="stoploss" : await
-                                        msg.reply_text( f"✅ *{symbol}* נבחר\n\nשלח את מחיר הכניסה (למשל: `45.50`)",
-                                        parse_mode="Markdown" , ) if ctx is not None:
-                                        ctx.user_data["pending_stoploss"]=symbol #
-                                        ───────────────────────────────────────────────────────────── # Inline callback
-                                        handler # ───────────────────────────────────────────────────────────── async
-                                        def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-                                        query = update.callback_query
-                                        await query.answer()
-                                        data = query.data
-                                        prefix, _, payload = data.partition(":")
-
-                                        if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis",
-                                        "setups", "richanalysis",
-                                        "ichimoku", "stoch", "pivot", "obv", "atr", "stoploss"):
-                                        await _run_symbol_action(prefix, payload, query.message, ctx)
-
-                                        elif prefix == "more":
-                                        if payload == "earnings":
-                                        await query.message.reply_text("⏳ בודק Earnings…")
-                                        msgs = await asyncio.get_event_loop().run_in_executor(None,
-                                        build_earnings_messages)
-                                        if msgs:
-                                        for m in msgs:
-                                        await query.message.reply_text(m, parse_mode="Markdown")
-                                        else:
-                                        await query.message.reply_text("אין Earnings קרובים ברשימה.")
-                                        elif payload == "levels":
-                                        await query.message.reply_text(
-                                        "בחר מנייה לרמות תמיכה/התנגדות:",
-                                        reply_markup=build_symbol_picker("levels"),
-                                        )
-                                        elif payload == "news":
-                                        await query.message.reply_text("⏳ מושך חדשות…")
-                                        msg = await asyncio.get_event_loop().run_in_executor(None,
-                                        build_morning_message)
-                                        await query.message.reply_text(msg, parse_mode="Markdown")
-                                        elif payload == "help":
-                                        await query.message.reply_text(
-                                        "📋 *פקודות זמינות:*\n"
-                                        " /status — מחירים נוכחיים + RSI\n"
-                                        " /analysis NNE — ניתוח מלא\n"
-                                        " /levels NNE — תמיכות והתנגדויות\n"
-                                        " /chart NNE — גרף נרות 30 ימים\n"
-                                        " /bb NNE — Bollinger Bands\n"
-                                        " /fib NNE — רמות פיבונאצ'י\n"
-                                        " /vwap NNE — VWAP\n"
-                                        " /ichimoku NNE — Ichimoku Cloud\n"
-                                        " /stoch NNE — Stochastic RSI\n"
-                                        " /pivot NNE — Pivot Points יומיים\n"
-                                        " /obv NNE — On Balance Volume\n"
-                                        " /atr NNE — ATR (תנודתיות)\n"
-                                        " /stoploss NNE 45.50 — Stop Loss אוטומטי\n"
-                                        " /stop — השהה התראות\n"
-                                        " /resume — חדש התראות",
-                                        parse_mode="Markdown",
-                                        )
-
-
-                                        # ─────────────────────────────────────────────────────────────
-                                        # Reply-keyboard text handler
-                                        # ─────────────────────────────────────────────────────────────
-
-                                        async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-                                        text = (update.message.text or "").strip()
-
-                                        pending_sl = ctx.user_data.get("pending_stoploss")
-                                        if pending_sl:
-                                        try:
-                                        entry = float(text.replace(",", "."))
-                                        ctx.user_data.pop("pending_stoploss", None)
-                                        await update.message.reply_text(f"⏳ מחשב Stop Loss עבור {pending_sl}…")
-                                        result = await asyncio.get_event_loop().run_in_executor(None, get_stoploss,
-                                        pending_sl, entry)
-                                        await update.message.reply_text(result, parse_mode="Markdown")
-                                        return
-                                        except ValueError:
-                                        await update.message.reply_text(
-                                        "❌ מחיר לא תקין. שלח מספר בלבד (למשל: `45.50`)",
-                                        parse_mode="Markdown",
-                                        )
-                                        return
-
-                                        if text == "📈 סטטוס":
-                                        await _send_status(update.message)
-                                        elif text == "🔍 סקרינר":
-                                        await update.message.reply_text("⏳ מריץ סקרינר… (עשוי לקחת זמן)")
-                                        msg = await asyncio.get_event_loop().run_in_executor(None,
-                                        build_screener_message)
-                                        await update.message.reply_text(msg, parse_mode="Markdown")
-                                        elif text in SYMBOL_ACTIONS:
-                                        prefix = _ACTION_PREFIX[text]
-                                        labels = {
-                                        "chart": "📊 גרף", "fib": "📐 פיבונאצ'י", "bb": "📉 BB",
-                                        "vwap": "⚡ VWAP", "setups": "🎯 סט-אפים", "richanalysis": "🔎 ניתוח",
-                                        "ichimoku": "☁️ Ichimoku", "stoch": "📉 Stoch RSI", "pivot": "📐 Pivot",
-                                        "obv": "💹 OBV", "stoploss": "🛑 Stop Loss",
-                                        }
-                                        await update.message.reply_text(
-                                        f"בחר מנייה עבור {labels.get(prefix, prefix)}:",
-                                        reply_markup=build_symbol_picker(prefix),
-                                        )
-                                        elif text == "😱 Fear & Greed":
-                                        await update.message.reply_text("⏳ מושך Fear & Greed Index…")
-                                        msg = await asyncio.get_event_loop().run_in_executor(None,
-                                        build_fear_greed_message)
-                                        await update.message.reply_text(msg, parse_mode="Markdown")
-                                        elif text == "🗂 עוד פקודות":
-                                        await update.message.reply_text("בחר פעולה:",
-                                        reply_markup=build_more_keyboard())
-
-
-                                        # ─────────────────────────────────────────────────────────────
-                                        # Main — runs FastAPI + Telegram bot concurrently
-                                        # ─────────────────────────────────────────────────────────────
-
-                                        def main() -> None:
-                                        global OWNER_CHAT_ID, _dynamic_watchlist
-
-                                        if not TOKEN:
-                                        raise RuntimeError("TELEGRAM_TOKEN לא מוגדר!")
-
-                                        init_db()
-
-                                        # Restore chat_id
-                                        saved = get_setting("chat_id")
-                                        if saved:
-                                        OWNER_CHAT_ID = int(saved)
-                                        log.info("Restored owner chat_id: %d", OWNER_CHAT_ID)
-
-                                        # Restore dynamic watchlist
-                                        saved_wl = get_setting("dynamic_watchlist")
-                                        if saved_wl:
-                                        _dynamic_watchlist = saved_wl.split(",")
-                                        log.info("Restored watchlist: %s", _dynamic_watchlist)
-
-                                        app = Application.builder().token(TOKEN).build()
-
-                                        app.add_handler(CommandHandler("start", cmd_start))
-                                        app.add_handler(CommandHandler("menu", cmd_menu))
-                                        app.add_handler(CommandHandler("status", cmd_status))
-                                        app.add_handler(CommandHandler("analysis", cmd_analysis))
-                                        app.add_handler(CommandHandler("levels", cmd_levels))
-                                        app.add_handler(CommandHandler("chart", cmd_chart))
-                                        app.add_handler(CommandHandler("bb", cmd_bb))
-                                        app.add_handler(CommandHandler("fib", cmd_fib))
-                                        app.add_handler(CommandHandler("vwap", cmd_vwap))
-                                        app.add_handler(CommandHandler("ichimoku", cmd_ichimoku))
-                                        app.add_handler(CommandHandler("stoch", cmd_stoch))
-                                        app.add_handler(CommandHandler("pivot", cmd_pivot))
-                                        app.add_handler(CommandHandler("obv", cmd_obv))
-                                        app.add_handler(CommandHandler("atr", cmd_atr))
-                                        app.add_handler(CommandHandler("stoploss", cmd_stoploss))
-                                        app.add_handler(CommandHandler("stop", cmd_stop))
-                                        app.add_handler(CommandHandler("resume", cmd_resume))
-                                        app.add_handler(CallbackQueryHandler(handle_callback))
-                                        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-                                        async def post_init(application: Application) -> None:
-                                        asyncio.create_task(scan_loop(application))
-                                        asyncio.create_task(morning_news_loop(application))
-                                        asyncio.create_task(earnings_loop(application))
-                                        asyncio.create_task(screener_loop(application))
-                                        asyncio.create_task(setup_scan_loop(application))
-                                        # Start FastAPI web server
-                                        config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="warning")
-                                        server = uvicorn.Server(config)
-                                        asyncio.create_task(server.serve())
-                                        log.info("✅ FastAPI server started on port %d", PORT)
-
-                                        app.post_init = post_init
-
-                                        log.info("✅ Trading bot started — watching %d symbols", len(_dynamic_watchlist))
-                                        app.run_polling(drop_pending_updates=True)
-
-
-                                        if __name__ == "__main__":
-                                        main()
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#161b22',
+          borderColor: '#30363d',
+          borderWidth: 1,
+          titleColor: '#e6edf3',
+          bodyColor: '#8b949e',
+          callbacks: {
+            label: (ctx) => `$${ctx.parsed.y?.toFixed ? ctx.parsed.y.toFixed(2) : '—'}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(48,54,61,0.5)', drawBorder: false },
+          ticks: { color: '#8b949e', font: { size: 10 }, maxTicksLimit: 6, maxRotation: 0 }
+        },
+        y: {
+          position: 'left',
+          grid: { color: 'rgba(48,54,61,0.5)', drawBorder: false },
+          ticks: { color: '#8b949e', font: { size: 10 }, callback: v => '$' + v.toFixed(0) }
+        }
+      }
+    }
+  });
+}
+
+// ══════════════════════════════════════════════
+// PAGE 4 — FEAR & GREED
+// ══════════════════════════════════════════════
+let fgChart = null;
+
+async function loadFearGreed() {
+  const el = document.getElementById('fg-content');
+  el.innerHTML = `<div class="loading"><div class="loading-spinner"></div><div>טוען…</div></div>`;
+  try {
+    const data = await apiFetch('/api/fear_greed');
+    renderFearGreed(el, data);
+  } catch (e) {
+    el.innerHTML = `<div class="error-msg">⚠️ שגיאה<br><small>${e.message}</small></div>`;
+  }
+}
+
+function getFGColor(val) {
+  if (val <= 25) return '#f85149';
+  if (val <= 45) return '#d29922';
+  if (val <= 55) return '#8b949e';
+  if (val <= 75) return '#3fb950';
+  return '#4ae168';
+}
+
+function getFGName(val) {
+  if (val <= 25) return 'פחד קיצוני';
+  if (val <= 45) return 'פחד';
+  if (val <= 55) return 'נייטרלי';
+  if (val <= 75) return 'חמדנות';
+  return 'חמדנות קיצונית';
+}
+
+function renderFearGreed(el, data) {
+  const val = data.value ?? data.score ?? 0;
+  const prev = data.previous_close ?? data.yesterday ?? null;
+  const week = data.last_week ?? null;
+  const month = data.last_month ?? null;
+  const color = getFGColor(val);
+  const name  = getFGName(val);
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="fg-gauge-wrap">
+        <canvas id="fg-gauge" width="240" height="130"></canvas>
+        <div class="fg-label" style="color:${color}">${val}</div>
+        <div class="fg-name" style="color:${color}">${name}</div>
+        ${prev != null ? `<div class="fg-prev">אתמול: ${prev} | לפני שבוע: ${week ?? '—'}</div>` : ''}
+      </div>
+
+      <div class="fg-scale">
+        <div class="fg-scale-item fg-extreme-fear">פחד קיצוני<br>0–25</div>
+        <div class="fg-scale-item fg-fear">פחד<br>26–45</div>
+        <div class="fg-scale-item fg-neutral">נייטרלי<br>46–55</div>
+        <div class="fg-scale-item fg-greed">חמדנות<br>56–75</div>
+        <div class="fg-scale-item fg-extreme-greed">חמדנות קיצונית<br>76–100</div>
+      </div>
+    </div>
+
+    ${(data.components || data.indicators) ? renderFGComponents(data) : ''}
+
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">פרשנות</div>
+      <div style="font-size:13px;line-height:1.6;color:var(--text-muted)">
+        ${val <= 25
+          ? '😱 שוק בפחד קיצוני. היסטורית, זה עשוי להיות הזמן לקנות — "Be greedy when others are fearful."'
+          : val <= 45
+          ? '😰 השוק בפחד. מומלץ לשמור על משמעת וכניסות מדורגות.'
+          : val <= 55
+          ? '😐 שוק נייטרלי. אין עדיפות ברורה לכיוון.'
+          : val <= 75
+          ? '😏 שוק חמדני. כדאי להיות זהיר יותר עם כניסות חדשות.'
+          : '🤑 חמדנות קיצונית. שוק עשוי להיות מוגזם — "Be fearful when others are greedy."'
+        }
+      </div>
+    </div>
+  `;
+
+  drawGauge(val, color);
+}
+
+function renderFGComponents(data) {
+  const comps = data.components || data.indicators || {};
+  if (!Object.keys(comps).length) return '';
+  return `
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">רכיבים</div>
+      ${Object.entries(comps).map(([k, v]) => `
+        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:13px">${k}</span>
+          <span style="font-size:13px;font-weight:600;color:${getFGColor(typeof v === 'object' ? v.value ?? 50 : v)}">${typeof v === 'object' ? v.value_classification ?? v.value : v}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function drawGauge(val, color) {
+  const canvas = document.getElementById('fg-gauge');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const cx = 120, cy = 120, r = 90;
+
+  ctx.clearRect(0, 0, 240, 130);
+
+  // Background arc
+  const sections = [
+    { from: 0, to: 25,  color: '#f85149' },
+    { from: 25, to: 45, color: '#d29922' },
+    { from: 45, to: 55, color: '#8b949e' },
+    { from: 55, to: 75, color: '#3fb950' },
+    { from: 75, to: 100,color: '#4ae168' },
+  ];
+
+  for (const s of sections) {
+    const startAngle = Math.PI + (s.from / 100) * Math.PI;
+    const endAngle   = Math.PI + (s.to   / 100) * Math.PI;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, startAngle, endAngle);
+    ctx.lineWidth = 16;
+    ctx.strokeStyle = s.color + '55';
+    ctx.stroke();
+  }
+
+  // Fill up to value
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, Math.PI, Math.PI + (val / 100) * Math.PI);
+  ctx.lineWidth = 16;
+  ctx.strokeStyle = color;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // Needle
+  const angle = Math.PI + (val / 100) * Math.PI;
+  const nx = cx + (r - 20) * Math.cos(angle);
+  const ny = cy + (r - 20) * Math.sin(angle);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(nx, ny);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // Center dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+
+  // Labels
+  ctx.font = 'bold 11px -apple-system, sans-serif';
+  ctx.fillStyle = '#8b949e';
+  ctx.textAlign = 'center';
+  ctx.fillText('0', cx - r - 2, cy + 16);
+  ctx.fillText('100', cx + r + 2, cy + 16);
+  ctx.fillText('50', cx, cy - r - 6);
+}
+
+// ══════════════════════════════════════════════
+// MODAL (analysis from watchlist tap)
+// ══════════════════════════════════════════════
+async function openAnalysisModal(sym) {
+  const overlay = document.getElementById('modal-overlay');
+  const content = document.getElementById('modal-content');
+  overlay.classList.add('open');
+  content.innerHTML = `
+    <div class="modal-title">${sym}</div>
+    <div class="loading"><div class="loading-spinner"></div><div>מנתח…</div></div>
+  `;
+
+  try {
+    const d = await apiFetch(`/api/analysis/${sym}`);
+    const chg = d.change ?? 0;
+    const cls = changeClass(chg);
+    const sign = chg >= 0 ? '+' : '';
+    let macdColor = d.macd_hist != null ? (d.macd_hist >= 0 ? 'macd-pos' : 'macd-neg') : '';
+
+    content.innerHTML = `
+      <div class="modal-title" style="direction:ltr">${sym}</div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div style="font-size:26px;font-weight:800">$${fmt(d.price)}</div>
+        <div class="${cls}" style="font-size:15px;font-weight:700;padding:4px 12px;border-radius:6px">${sign}${fmt(chg,2)}%</div>
+      </div>
+
+      <div class="indicators-grid">
+        <div class="indicator-card">
+          <div class="indicator-label">RSI</div>
+          <div class="indicator-value" style="color:${d.rsi > 70 ? 'var(--red)' : d.rsi < 30 ? 'var(--green)' : 'var(--text)'}">${fmt(d.rsi,1)}</div>
+          <div class="indicator-sub">${d.rsi > 70 ? '⚠️ Overbought' : d.rsi < 30 ? '🔥 Oversold' : 'נייטרלי'}</div>
+        </div>
+        <div class="indicator-card">
+          <div class="indicator-label">MACD</div>
+          <div class="indicator-value ${macdColor}">${fmt(d.macd, 3)}</div>
+          <div class="indicator-sub">Hist: ${fmt(d.macd_hist, 3)}</div>
+        </div>
+        <div class="indicator-card">
+          <div class="indicator-label">BB Upper/Lower</div>
+          <div style="font-size:12px;color:var(--red);font-weight:600">$${fmt(d.bb_upper)}</div>
+          <div style="font-size:12px;color:var(--green);font-weight:600">$${fmt(d.bb_lower)}</div>
+        </div>
+        <div class="indicator-card">
+          <div class="indicator-label">MA50 / MA200</div>
+          <div style="font-size:12px;color:var(--blue);font-weight:600">$${fmt(d.ma50)}</div>
+          <div style="font-size:12px;color:var(--purple);font-weight:600">$${fmt(d.ma200)}</div>
+        </div>
+      </div>
+
+      <div class="levels-row" style="margin-top:10px">
+        <div class="level-block">
+          <div class="level-block-title" style="color:var(--green)">🛡️ תמיכות</div>
+          ${(d.supports||[]).map(v=>`<div class="level-item" style="color:var(--green)">$${fmt(v)}</div>`).join('')||'<div>—</div>'}
+        </div>
+        <div class="level-block">
+          <div class="level-block-title" style="color:var(--red)">🔺 התנגדויות</div>
+          ${(d.resistances||[]).map(v=>`<div class="level-item" style="color:var(--red)">$${fmt(v)}</div>`).join('')||'<div>—</div>'}
+        </div>
+      </div>
+
+      <button class="btn-primary" style="width:100%;margin-top:16px"
+        onclick="closeModal();showPage('analysis',document.querySelector('.nav-btn:nth-child(3)'));document.getElementById('analysis-input').value='${sym}';loadAnalysis()">
+        ניתוח מלא עם גרף →
+      </button>
+    `;
+  } catch (e) {
+    content.innerHTML = `<div class="modal-title" style="direction:ltr">${sym}</div><div class="error-msg">⚠️ שגיאה: ${e.message}</div>`;
+  }
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modal-overlay')) return;
+  document.getElementById('modal-overlay').classList.remove('open');
+}
+
+// ══════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════
+pageLoaded['watchlist'] = true;
+loadWatchlist();
+</script>
+</body>
+</html>
