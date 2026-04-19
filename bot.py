@@ -78,6 +78,21 @@ alerts_paused: bool = False
 # Mutable watchlist (copy of WATCHLIST so we can edit it at runtime)
 _dynamic_watchlist: list[str] = list(WATCHLIST)
 
+# _fetch_daily cache: symbol -> (timestamp, df)
+_fetch_cache: dict = {}
+
+def _fetch_daily_cached(symbol: str):
+    import time
+    now = time.time()
+    if symbol in _fetch_cache:
+        ts, df = _fetch_cache[symbol]
+        if now - ts < 60:
+            log.info("Cache hit for %s (age=%.1fs)", symbol, now - ts)
+            return df
+    df = _fetch_daily(symbol)
+    _fetch_cache[symbol] = (now, df)
+    return df
+
 
 # ─────────────────────────────────────────────────────────────
 #  FastAPI — Mini App backend
@@ -154,7 +169,7 @@ async def api_analysis(symbol: str):
     symbol = symbol.upper()
     try:
         log.info("API analysis request for %s", symbol)
-        df = await asyncio.get_event_loop().run_in_executor(None, _fetch_daily, symbol)
+        df = await asyncio.get_event_loop().run_in_executor(None, _fetch_daily_cached, symbol)
         log.info("DataFrame for %s: is_none=%s, len=%d", symbol, df is None, len(df) if df is not None else 0)
 
         if df is None or df.empty or len(df) < 5:
@@ -162,7 +177,7 @@ async def api_analysis(symbol: str):
             raise HTTPException(status_code=404, detail=f"אין נתונים עבור {symbol}")
 
         supports, resistances = _find_sr(df)
-        closes = df["Close"].tolist()
+        closes = df["Close"]
         latest = float(df["Close"].iloc[-1])
         prev   = float(df["Close"].iloc[-2]) if len(df) > 1 else latest
         change = (latest - prev) / prev * 100 if prev else 0
