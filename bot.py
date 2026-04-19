@@ -524,13 +524,12 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton("📱 פתח Dashboard", web_app={"url": mini_app_url})],
-            [KeyboardButton("📈 סטטוס"),        KeyboardButton("🔍 סקרינר")],
-            [KeyboardButton("📊 גרף"),           KeyboardButton("🎯 סט-אפים")],
+            [KeyboardButton("🎯 סט-אפים"),                                        ],
             [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
-            [KeyboardButton("📐 פיבונאצ'י"),    KeyboardButton("🔎 ניתוח")],
+            [KeyboardButton("📐 פיבונאצ'י"),                                      ],
             [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
             [KeyboardButton("💹 OBV"),           KeyboardButton("🛑 Stop Loss")],
-            [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
+            [KeyboardButton("🗂 עוד פקודות"),                                     ],
         ],
         resize_keyboard=True,
     )
@@ -708,13 +707,12 @@ PENDING_KEY = "pending_action"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("📈 סטטוס"),        KeyboardButton("🔍 סקרינר")],
-        [KeyboardButton("📊 גרף"),           KeyboardButton("🎯 סט-אפים")],
+        [KeyboardButton("🎯 סט-אפים"),                                        ],
         [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
-        [KeyboardButton("📐 פיבונאצ'י"),    KeyboardButton("🔎 ניתוח")],
+        [KeyboardButton("📐 פיבונאצ'י"),                                      ],
         [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
         [KeyboardButton("💹 OBV"),           KeyboardButton("🛑 Stop Loss")],
-        [KeyboardButton("😱 Fear & Greed"), KeyboardButton("🗂 עוד פקודות")],
+        [KeyboardButton("🗂 עוד פקודות"),                                     ],
     ],
     resize_keyboard=True,
 )
