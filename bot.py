@@ -153,8 +153,12 @@ async def api_analysis(symbol: str):
     """Returns full technical analysis for a symbol."""
     symbol = symbol.upper()
     try:
+        log.info("API analysis request for %s", symbol)
         df = await asyncio.get_event_loop().run_in_executor(None, _fetch_daily, symbol)
+        log.info("DataFrame for %s: is_none=%s, len=%d", symbol, df is None, len(df) if df is not None else 0)
+
         if df is None or df.empty or len(df) < 5:
+            log.warning("Insufficient data for %s — returning 404", symbol)
             raise HTTPException(status_code=404, detail=f"אין נתונים עבור {symbol}")
 
         supports, resistances = _find_sr(df)
@@ -166,6 +170,7 @@ async def api_analysis(symbol: str):
         # RSI
         from analysis import _rsi, _macd, _bollinger, _sma
         rsi_val = _rsi(closes)
+        log.info("%s — price=%.2f change=%.2f%% rsi=%s", symbol, latest, change, rsi_val)
 
         # MACD
         macd_val, signal_val, hist_val, _ = _macd(closes)
@@ -190,6 +195,9 @@ async def api_analysis(symbol: str):
                 "volume": int(row["Volume"]),
             })
 
+        log.info("%s — returning %d candles, %d supports, %d resistances",
+                 symbol, len(candles), len(supports), len(resistances))
+
         return {
             "symbol":      symbol,
             "price":       round(latest, 2),
@@ -210,6 +218,7 @@ async def api_analysis(symbol: str):
     except HTTPException:
         raise
     except Exception as e:
+        log.error("API analysis error for %s: %s", symbol, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
