@@ -924,9 +924,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 #  Reply-keyboard text handler
 # ─────────────────────────────────────────────────────────────
 
+_KNOWN_BUTTONS = SYMBOL_ACTIONS | {"📈 סטטוס", "🔍 סקרינר", "😱 Fear & Greed", "🗂 עוד פקודות"}
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
 
+    # ── Step 2 of Stop Loss: waiting for entry price ──────────
     pending_sl = ctx.user_data.get("pending_stoploss")
     if pending_sl:
         try:
@@ -943,6 +947,32 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+    # ── Step 2 of any symbol action: waiting for ticker ───────
+    pending_action = ctx.user_data.get(PENDING_KEY)
+    if pending_action:
+        # If the user pressed a menu button instead of typing a ticker, cancel pending
+        # and fall through to handle the button normally.
+        if text not in _KNOWN_BUTTONS and not text.startswith("/"):
+            symbol = text.upper().strip()
+            ctx.user_data.pop(PENDING_KEY, None)
+            if not symbol:
+                await update.message.reply_text("❌ סימול לא תקין — נסה שוב.")
+                return
+            if pending_action == "stoploss":
+                # Stop Loss needs a second step: entry price
+                await update.message.reply_text(
+                    f"✅ *{symbol}* נבחר\n\nשלח את מחיר הכניסה (למשל: `45.50`)",
+                    parse_mode="Markdown",
+                )
+                ctx.user_data["pending_stoploss"] = symbol
+            else:
+                await _run_symbol_action(pending_action, symbol, update.message, ctx)
+            return
+        else:
+            # Cancel stale pending action so the button press is handled normally
+            ctx.user_data.pop(PENDING_KEY, None)
+
+    # ── Regular menu buttons ──────────────────────────────────
     if text == "📈 סטטוס":
         await _send_status(update.message)
     elif text == "🔍 סקרינר":
@@ -951,15 +981,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(msg, parse_mode="Markdown")
     elif text in SYMBOL_ACTIONS:
         prefix = _ACTION_PREFIX[text]
-        labels = {
-            "chart": "📊 גרף", "fib": "📐 פיבונאצ'י", "bb": "📉 BB",
-            "vwap": "⚡ VWAP", "setups": "🎯 סט-אפים", "richanalysis": "🔎 ניתוח",
-            "ichimoku": "☁️ Ichimoku", "stoch": "📉 Stoch RSI", "pivot": "📐 Pivot",
-            "obv": "💹 OBV", "stoploss": "🛑 Stop Loss",
-        }
+        ctx.user_data[PENDING_KEY] = prefix
         await update.message.reply_text(
-            f"בחר מנייה עבור {labels.get(prefix, prefix)}:",
-            reply_markup=build_symbol_picker(prefix),
+            f"{text} — כתוב את הסימול של המנייה (למשל: NNE, AAPL, BTC-USD)"
         )
     elif text == "😱 Fear & Greed":
         await update.message.reply_text("⏳ מושך Fear & Greed Index…")
