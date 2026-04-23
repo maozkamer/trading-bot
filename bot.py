@@ -86,7 +86,7 @@ def _fetch_daily_cached(symbol: str):
     now = time.time()
     if symbol in _fetch_cache:
         ts, df = _fetch_cache[symbol]
-        if now - ts < 60:
+        if now - ts < 21600:
             log.info("Cache hit for %s (age=%.1fs)", symbol, now - ts)
             return df
     df = _fetch_daily(symbol)
@@ -266,26 +266,36 @@ async def api_fear_greed():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_profile_cache: dict = {}
+
+
 @api.get("/api/profile/{symbol}")
 async def api_profile(symbol: str):
+    import time
     symbol = symbol.upper()
+    now = time.time()
+    if symbol in _profile_cache:
+        ts, data = _profile_cache[symbol]
+        if now - ts < 86400:
+            return data
     try:
         import yfinance as yf
 
         def _fetch():
             info = yf.Ticker(symbol).info
             return {
-                "name":      info.get("longName", symbol),
-                "sector":    info.get("sector", ""),
-                "summary":   info.get("longBusinessSummary", "")[:300],
-                "country":   info.get("country", ""),
-                "employees": info.get("fullTimeEmployees", 0),
+                "name":       info.get("longName", symbol),
+                "sector":     info.get("sector", ""),
+                "summary":    info.get("longBusinessSummary", "")[:400],
+                "country":    info.get("country", ""),
                 "market_cap": info.get("marketCap", 0),
             }
 
-        return await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
     except Exception:
-        return {"name": symbol, "sector": "", "summary": "", "country": "", "employees": 0, "market_cap": 0}
+        data = {"name": symbol, "sector": "", "summary": "", "country": "", "market_cap": 0}
+    _profile_cache[symbol] = (now, data)
+    return data
 
 
 # Serve Mini App static files
@@ -1056,11 +1066,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     async def post_init(application: Application) -> None:
-        asyncio.create_task(scan_loop(application))
-        asyncio.create_task(morning_news_loop(application))
-        asyncio.create_task(earnings_loop(application))
-        asyncio.create_task(screener_loop(application))
-        asyncio.create_task(setup_scan_loop(application))
         # Start FastAPI web server
         config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="warning")
         server = uvicorn.Server(config)
