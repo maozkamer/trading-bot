@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -523,13 +523,12 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton("📱 פתח Dashboard", web_app={"url": mini_app_url})],
+            [KeyboardButton("📊 Trading Dashboard", web_app=WebAppInfo(url=mini_app_url))],
             [KeyboardButton("🎯 סט-אפים"),                                        ],
             [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
             [KeyboardButton("📐 פיבונאצ'י"),                                      ],
             [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
             [KeyboardButton("💹 OBV"),           KeyboardButton("🛑 Stop Loss")],
-            [KeyboardButton("🗂 עוד פקודות"),                                     ],
         ],
         resize_keyboard=True,
     )
@@ -712,7 +711,6 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("📐 פיבונאצ'י"),                                      ],
         [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
         [KeyboardButton("💹 OBV"),           KeyboardButton("🛑 Stop Loss")],
-        [KeyboardButton("🗂 עוד פקודות"),                                     ],
     ],
     resize_keyboard=True,
 )
@@ -924,7 +922,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 #  Reply-keyboard text handler
 # ─────────────────────────────────────────────────────────────
 
-_KNOWN_BUTTONS = SYMBOL_ACTIONS | {"📈 סטטוס", "🔍 סקרינר", "😱 Fear & Greed", "🗂 עוד פקודות"}
+_KNOWN_BUTTONS = SYMBOL_ACTIONS | {"📈 סטטוס", "🔍 סקרינר", "😱 Fear & Greed"}
 
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -989,8 +987,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⏳ מושך Fear & Greed Index…")
         msg = await asyncio.get_event_loop().run_in_executor(None, build_fear_greed_message)
         await update.message.reply_text(msg, parse_mode="Markdown")
-    elif text == "🗂 עוד פקודות":
-        await update.message.reply_text("בחר פעולה:", reply_markup=build_more_keyboard())
 
 
 # ─────────────────────────────────────────────────────────────
