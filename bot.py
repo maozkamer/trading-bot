@@ -537,7 +537,6 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     OWNER_CHAT_ID = update.effective_chat.id
     save_setting("chat_id", str(OWNER_CHAT_ID))
 
-    mini_app_url = f"https://trading-bot-production-5207.up.railway.app/app"
     symbols_str = " | ".join(_dynamic_watchlist)
     text = (
         "📈 *בוט מסחר סווינג — פעיל!*\n\n"
@@ -546,7 +545,7 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         "⏰ *תדירות סריקה:*\n"
         "  • שעות מסחר (09:30‑16:00 EST): כל שעה\n"
         "  • לילה / סוף שבוע: כל 4 שעות\n\n"
-        "📱 *Dashboard:* לחץ על הכפתור למטה\n\n"
+        "⚡ *Dashboard:* לחץ על כפתור Live בתחתית\n\n"
         "📋 *פקודות:*\n"
         "  /status — מחירים נוכחיים + RSI\n"
         "  /analysis AAPL — ניתוח מלא\n"
@@ -558,7 +557,6 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton("📊 Trading Dashboard", web_app=WebAppInfo(url=mini_app_url))],
             [KeyboardButton("🎯 סט-אפים"),                                        ],
             [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
             [KeyboardButton("📐 פיבונאצ'י"),                                      ],
