@@ -272,33 +272,20 @@ async def api_profile(symbol: str):
     try:
         import yfinance as yf
 
-        def _fetch_profile():
+        def _fetch():
             info = yf.Ticker(symbol).info
-            cap = info.get("marketCap")
-            if cap:
-                if cap >= 1_000_000_000_000:
-                    cap_str = f"${cap / 1_000_000_000_000:.1f}T"
-                elif cap >= 1_000_000_000:
-                    cap_str = f"${cap / 1_000_000_000:.1f}B"
-                else:
-                    cap_str = f"${cap / 1_000_000:.1f}M"
-            else:
-                cap_str = None
             return {
-                "symbol":      symbol,
-                "name":        info.get("longName") or info.get("shortName"),
-                "sector":      info.get("sector"),
-                "description": info.get("longBusinessSummary"),
-                "country":     info.get("country"),
-                "employees":   info.get("fullTimeEmployees"),
-                "market_cap":  cap,
-                "market_cap_str": cap_str,
+                "name":      info.get("longName", symbol),
+                "sector":    info.get("sector", ""),
+                "summary":   info.get("longBusinessSummary", "")[:300],
+                "country":   info.get("country", ""),
+                "employees": info.get("fullTimeEmployees", 0),
+                "market_cap": info.get("marketCap", 0),
             }
 
-        data = await asyncio.get_event_loop().run_in_executor(None, _fetch_profile)
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    except Exception:
+        return {"name": symbol, "sector": "", "summary": "", "country": "", "employees": 0, "market_cap": 0}
 
 
 # Serve Mini App static files

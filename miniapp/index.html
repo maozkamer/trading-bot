@@ -632,6 +632,13 @@ function truncSentences(text, max) {
   return text.slice(0, i).trim();
 }
 
+function fmtCap(n) {
+  if (!n) return '—';
+  if (n >= 1e12) return '$' + (n / 1e12).toFixed(1) + 'T';
+  if (n >= 1e9)  return '$' + (n / 1e9).toFixed(1) + 'B';
+  return '$' + (n / 1e6).toFixed(1) + 'M';
+}
+
 function changeClass(v) {
   if (v > 0) return 'up';
   if (v < 0) return 'down';
@@ -791,17 +798,12 @@ function renderAnalysis(el, d, profile) {
   const supHtml = (d.supports || []).map(v => `<div class="level-item" style="color:var(--green)">$${fmt(v)}</div>`).join('') || '<div class="level-item">—</div>';
   const resHtml = (d.resistances || []).map(v => `<div class="level-item" style="color:var(--red)">$${fmt(v)}</div>`).join('') || '<div class="level-item">—</div>';
 
-  const profileHtml = profile ? `
-    <div class="card" style="margin-bottom:10px">
-      <div class="card-title">📋 על החברה</div>
-      <div style="font-size:15px;font-weight:700;margin-bottom:6px">🏢 ${profile.name || d.symbol}</div>
-      ${profile.sector ? `<div style="font-size:13px;color:var(--text-muted);margin-bottom:8px">🏭 סקטור: <span style="color:var(--blue);font-weight:600">${profile.sector}</span></div>` : ''}
-      ${profile.description ? `<div style="font-size:12px;color:var(--text-muted);line-height:1.55;margin-bottom:10px;direction:ltr;text-align:left">${truncSentences(profile.description, 2)}</div>` : ''}
-      <div style="display:flex;gap:14px;flex-wrap:wrap">
-        ${profile.market_cap_str ? `<div style="font-size:12px"><span style="color:var(--text-muted)">💰 שווי שוק</span><br><span style="font-weight:700;color:var(--green)">${profile.market_cap_str}</span></div>` : ''}
-        ${profile.country ? `<div style="font-size:12px"><span style="color:var(--text-muted)">🌍 מדינה</span><br><span style="font-weight:600">${profile.country}</span></div>` : ''}
-        ${profile.employees ? `<div style="font-size:12px"><span style="color:var(--text-muted)">👥 עובדים</span><br><span style="font-weight:600">${profile.employees.toLocaleString()}</span></div>` : ''}
-      </div>
+  const profileHtml = (profile && profile.name) ? `
+    <div style="background:#1a1a2e;border-radius:12px;padding:16px;margin:12px 0">
+      <div style="font-weight:700;font-size:1rem;margin-bottom:4px">🏢 ${profile.name}</div>
+      ${profile.sector ? `<div style="color:#888;font-size:.85rem;margin:4px 0">🏭 ${profile.sector}</div>` : ''}
+      ${profile.summary ? `<div style="font-size:.85rem;line-height:1.5;margin-top:8px;color:#ccc;direction:ltr;text-align:left">${profile.summary}</div>` : ''}
+      ${profile.market_cap ? `<div style="color:#4a90d9;font-size:.85rem;margin-top:8px">💰 שווי שוק: ${fmtCap(profile.market_cap)}</div>` : ''}
     </div>` : '';
 
   el.innerHTML = `
@@ -818,6 +820,9 @@ function renderAnalysis(el, d, profile) {
         </div>
       </div>
     </div>
+
+    <!-- Company Profile -->
+    ${profileHtml}
 
     <!-- Chart -->
     <div class="card">
@@ -868,8 +873,6 @@ function renderAnalysis(el, d, profile) {
       </div>
     </div>
 
-    <!-- Company Profile -->
-    ${profileHtml}
   `;
 
   // Draw chart
