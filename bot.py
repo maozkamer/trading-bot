@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1081,6 +1081,12 @@ def main() -> None:
         server = uvicorn.Server(config)
         asyncio.create_task(server.serve())
         log.info("✅ FastAPI server started on port %d", PORT)
+        await application.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="⚡ Live",
+                web_app=WebAppInfo(url="https://trading-bot-production-5207.up.railway.app/app"),
+            )
+        )
 
     app.post_init = post_init
 
