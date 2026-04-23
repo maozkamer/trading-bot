@@ -266,6 +266,41 @@ async def api_fear_greed():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@api.get("/api/profile/{symbol}")
+async def api_profile(symbol: str):
+    symbol = symbol.upper()
+    try:
+        import yfinance as yf
+
+        def _fetch_profile():
+            info = yf.Ticker(symbol).info
+            cap = info.get("marketCap")
+            if cap:
+                if cap >= 1_000_000_000_000:
+                    cap_str = f"${cap / 1_000_000_000_000:.1f}T"
+                elif cap >= 1_000_000_000:
+                    cap_str = f"${cap / 1_000_000_000:.1f}B"
+                else:
+                    cap_str = f"${cap / 1_000_000:.1f}M"
+            else:
+                cap_str = None
+            return {
+                "symbol":      symbol,
+                "name":        info.get("longName") or info.get("shortName"),
+                "sector":      info.get("sector"),
+                "description": info.get("longBusinessSummary"),
+                "country":     info.get("country"),
+                "employees":   info.get("fullTimeEmployees"),
+                "market_cap":  cap,
+                "market_cap_str": cap_str,
+            }
+
+        data = await asyncio.get_event_loop().run_in_executor(None, _fetch_profile)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Serve Mini App static files
 api.mount("/app", StaticFiles(directory="miniapp", html=True), name="miniapp")
 
