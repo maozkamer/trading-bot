@@ -271,7 +271,7 @@ _profile_cache: dict = {}
 
 @api.get("/api/profile/{symbol}")
 async def api_profile(symbol: str):
-    import time, requests
+    import time
     symbol = symbol.upper()
     now = time.time()
     if symbol in _profile_cache:
@@ -279,23 +279,20 @@ async def api_profile(symbol: str):
         if now - ts < 86400:
             return data
     try:
-        key = os.environ.get("TWELVE_DATA_KEY", "")
-        r = requests.get(
-            "https://api.twelvedata.com/profile",
-            params={"symbol": symbol, "apikey": key},
-            timeout=10,
-        )
-        info = r.json()
+        import yfinance as yf
+        info = yf.Ticker(symbol).info
         data = {
-            "name":       info.get("name", symbol),
+            "name":       info.get("longName") or info.get("shortName") or symbol,
             "sector":     info.get("sector", ""),
-            "summary":    info.get("description", "")[:400],
+            "summary":    (info.get("longBusinessSummary") or "")[:300],
             "country":    info.get("country", ""),
-            "market_cap": info.get("market_cap", 0),
+            "market_cap": info.get("marketCap", 0),
         }
-    except Exception:
+    except Exception as e:
+        log.warning(f"profile error {symbol}: {e}")
         data = {"name": symbol, "sector": "", "summary": "", "country": "", "market_cap": 0}
     _profile_cache[symbol] = (now, data)
+    log.info(f"profile {symbol}: {data['name']} / {data['sector']}")
     return data
 
 
