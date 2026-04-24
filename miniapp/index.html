@@ -547,6 +547,8 @@
   <div id="analysis-content">
     <div class="empty-msg">בחר מנייה לניתוח</div>
   </div>
+
+  <div id="company-profile" style="display:none;background:#1a1a2e;border-radius:12px;padding:16px;margin:12px 0;"></div>
 </div>
 
 <!-- ═══════════════════════════════════════════
@@ -776,18 +778,19 @@ async function loadAnalysis() {
   const el = document.getElementById('analysis-content');
   el.innerHTML = `<div class="loading"><div class="loading-spinner"></div><div>מנתח ${sym}…</div></div>`;
 
+  const profileEl = document.getElementById('company-profile');
+  if (profileEl) { profileEl.style.display = 'none'; profileEl.innerHTML = ''; }
+
   try {
-    const [d, profile] = await Promise.all([
-      apiFetch(`/api/analysis/${sym}`),
-      apiFetch(`/api/profile/${sym}`).catch(() => null),
-    ]);
-    renderAnalysis(el, d, profile);
+    const d = await apiFetch(`/api/analysis/${sym}`);
+    renderAnalysis(el, d);
+    loadProfile(sym);
   } catch (e) {
     el.innerHTML = `<div class="error-msg">⚠️ שגיאה עבור ${sym}<br><small>${e.message}</small></div>`;
   }
 }
 
-function renderAnalysis(el, d, profile) {
+function renderAnalysis(el, d) {
   const chg = d.change ?? 0;
   const cls = changeClass(chg);
   const sign = chg >= 0 ? '+' : '';
@@ -797,14 +800,6 @@ function renderAnalysis(el, d, profile) {
 
   const supHtml = (d.supports || []).map(v => `<div class="level-item" style="color:var(--green)">$${fmt(v)}</div>`).join('') || '<div class="level-item">—</div>';
   const resHtml = (d.resistances || []).map(v => `<div class="level-item" style="color:var(--red)">$${fmt(v)}</div>`).join('') || '<div class="level-item">—</div>';
-
-  const profileHtml = (profile && profile.name) ? `
-    <div style="background:#1a1a2e;border-radius:12px;padding:16px;margin:12px 0">
-      <div style="font-weight:700;font-size:1rem;margin-bottom:4px">🏢 ${profile.name}</div>
-      ${profile.sector ? `<div style="color:#888;font-size:.85rem;margin:4px 0">🏭 ${profile.sector}</div>` : ''}
-      ${profile.summary ? `<div style="font-size:.85rem;line-height:1.5;margin-top:8px;color:#ccc;direction:ltr;text-align:left">${profile.summary}</div>` : ''}
-      ${profile.market_cap ? `<div style="color:#4a90d9;font-size:.85rem;margin-top:8px">💰 שווי שוק: ${fmtCap(profile.market_cap)}</div>` : ''}
-    </div>` : '';
 
   el.innerHTML = `
     <!-- Header -->
@@ -820,9 +815,6 @@ function renderAnalysis(el, d, profile) {
         </div>
       </div>
     </div>
-
-    <!-- Company Profile -->
-    ${profileHtml}
 
     <!-- Chart -->
     <div class="card">
@@ -879,6 +871,23 @@ function renderAnalysis(el, d, profile) {
   if (d.candles && d.candles.length) {
     drawCandleChart(d.candles, d.supports || [], d.resistances || []);
   }
+}
+
+async function loadProfile(symbol) {
+  try {
+    const res = await fetch(`/api/profile/${symbol}`);
+    const data = await res.json();
+    const profileCard = document.getElementById('company-profile');
+    if (profileCard && data.name) {
+      profileCard.style.display = 'block';
+      profileCard.innerHTML = `
+        <div style="font-weight:700;font-size:.95rem;">🏢 ${data.name}</div>
+        ${data.sector ? `<div style="color:#888;font-size:.82rem;margin-top:4px;">🏭 ${data.sector}</div>` : ''}
+        ${data.summary ? `<div style="font-size:.82rem;line-height:1.5;margin-top:8px;color:#ccc;">${data.summary}</div>` : ''}
+        ${data.market_cap ? `<div style="color:#4a90d9;font-size:.82rem;margin-top:8px;">💰 שווי שוק: $${(data.market_cap / 1e9).toFixed(1)}B</div>` : ''}
+      `;
+    }
+  } catch(e) { console.log('profile error', e); }
 }
 
 function drawCandleChart(candles, supports, resistances) {
