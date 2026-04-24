@@ -548,7 +548,6 @@
     <div class="empty-msg">בחר מנייה לניתוח</div>
   </div>
 
-  <div id="company-profile" style="display:none;background:#1a1a2e;border-radius:12px;padding:16px;margin:12px 0;"></div>
 </div>
 
 <!-- ═══════════════════════════════════════════
@@ -778,13 +777,9 @@ async function loadAnalysis() {
   const el = document.getElementById('analysis-content');
   el.innerHTML = `<div class="loading"><div class="loading-spinner"></div><div>מנתח ${sym}…</div></div>`;
 
-  const profileEl = document.getElementById('company-profile');
-  if (profileEl) { profileEl.style.display = 'none'; profileEl.innerHTML = ''; }
-
   try {
     const d = await apiFetch(`/api/analysis/${sym}`);
     renderAnalysis(el, d);
-    loadProfile(sym);
   } catch (e) {
     el.innerHTML = `<div class="error-msg">⚠️ שגיאה עבור ${sym}<br><small>${e.message}</small></div>`;
   }
@@ -873,22 +868,6 @@ function renderAnalysis(el, d) {
   }
 }
 
-async function loadProfile(symbol) {
-  try {
-    const res = await fetch(`/api/profile/${symbol}`);
-    const data = await res.json();
-    const profileCard = document.getElementById('company-profile');
-    if (profileCard && data.name) {
-      profileCard.style.display = 'block';
-      profileCard.innerHTML = `
-        <div style="font-weight:700;font-size:.95rem;">🏢 ${data.name}</div>
-        ${data.sector ? `<div style="color:#888;font-size:.82rem;margin-top:4px;">🏭 ${data.sector}</div>` : ''}
-        ${data.summary ? `<div style="font-size:.82rem;line-height:1.5;margin-top:8px;color:#ccc;">${data.summary}</div>` : ''}
-        ${data.market_cap ? `<div style="color:#4a90d9;font-size:.82rem;margin-top:8px;">💰 שווי שוק: $${(data.market_cap / 1e9).toFixed(1)}B</div>` : ''}
-      `;
-    }
-  } catch(e) { console.log('profile error', e); }
-}
 
 function drawCandleChart(candles, supports, resistances) {
   if (candleChart) { candleChart.destroy(); candleChart = null; }

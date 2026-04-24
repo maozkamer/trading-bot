@@ -266,35 +266,6 @@ async def api_fear_greed():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-_profile_cache: dict = {}
-
-
-@api.get("/api/profile/{symbol}")
-async def api_profile(symbol: str):
-    import time
-    symbol = symbol.upper()
-    now = time.time()
-    if symbol in _profile_cache:
-        ts, data = _profile_cache[symbol]
-        if now - ts < 86400:
-            return data
-    try:
-        import yfinance as yf
-        info = yf.Ticker(symbol).info
-        data = {
-            "name":       info.get("longName") or info.get("shortName") or symbol,
-            "sector":     info.get("sector", ""),
-            "summary":    (info.get("longBusinessSummary") or "")[:300],
-            "country":    info.get("country", ""),
-            "market_cap": info.get("marketCap", 0),
-        }
-    except Exception as e:
-        log.warning(f"profile error {symbol}: {e}")
-        data = {"name": symbol, "sector": "", "summary": "", "country": "", "market_cap": 0}
-    _profile_cache[symbol] = (now, data)
-    log.info(f"profile {symbol}: {data['name']} / {data['sector']}")
-    return data
-
 
 # Serve Mini App static files
 api.mount("/app", StaticFiles(directory="miniapp", html=True), name="miniapp")
