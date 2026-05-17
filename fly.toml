@@ -1,0 +1,9 @@
+app = "trading-bot"
+primary_region = "iad"
+
+[build]
+
+[processes]
+app = "python bot.py"
+
+[env]
