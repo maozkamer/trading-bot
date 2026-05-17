@@ -16,10 +16,20 @@ import numpy as np
 import pandas as pd
 import requests
 
-TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY")
+TWELVE_DATA_KEY = (
+    os.environ.get("TWELVE_DATA_KEY") or
+    os.environ.get("TWELVEDATAKEY") or
+    os.environ.get("TWELVE_DATA_API_KEY")
+)
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
 log = logging.getLogger(__name__)
+
+# Log API key status at import time so it appears in fly logs
+if TWELVE_DATA_KEY:
+    log.info("✅ Twelve Data API key loaded (%d chars)", len(TWELVE_DATA_KEY))
+else:
+    log.error("❌ TWELVE_DATA_KEY not found! Set it via: fly secrets set TWELVEDATAKEY=<your_key>")
 
 # ─────────────────────────────────────────────────────────────
 #  Twelve Data helpers + in-process cache
@@ -47,8 +57,15 @@ def _fetch_daily(symbol: str, outputsize: int = 60) -> pd.DataFrame:
     Returns a DataFrame with DatetimeIndex and columns:
       Open, High, Low, Close, Volume
     """
-    if not TWELVE_DATA_KEY:
-        raise RuntimeError("TWELVE_DATA_KEY environment variable is not set")
+    api_key = (
+        TWELVE_DATA_KEY or
+        os.environ.get("TWELVE_DATA_KEY") or
+        os.environ.get("TWELVEDATAKEY") or
+        os.environ.get("TWELVE_DATA_API_KEY")
+    )
+    if not api_key:
+        raise RuntimeError("TWELVE_DATA_KEY environment variable is not set. "
+                           "Run: fly secrets set TWELVEDATAKEY=<your_key>")
 
     _ck = f"{symbol}:{outputsize}"
     now = time.monotonic()
@@ -66,7 +83,7 @@ def _fetch_daily(symbol: str, outputsize: int = 60) -> pd.DataFrame:
                     "symbol":     _api_symbol(symbol),
                     "interval":   "1day",
                     "outputsize": outputsize,
-                    "apikey":     TWELVE_DATA_KEY,
+                    "apikey":     api_key,
                 },
                 timeout=30,
             )
