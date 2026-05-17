@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for trading-bot-vxxupg on 2026-05-17T17:27:09Z
+# fly.toml app configuration file generated for trading-bot-d-pngg on 2026-05-17T17:49:09Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'trading-bot-vxxupg'
-primary_region = 'iad'
+app = 'trading-bot-d-pngg'
+primary_region = 'ams'
 
 [build]
 
@@ -12,7 +12,7 @@ primary_region = 'iad'
   app = 'python bot.py'
 
 [http_service]
-  internal_port = 8000
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
