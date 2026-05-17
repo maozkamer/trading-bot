@@ -1043,7 +1043,7 @@ def main() -> None:
         await application.bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="⚡ Live",
-                web_app=WebAppInfo(url="https://trading-bot-production-5207.up.railway.app/app"),
+                web_app=WebAppInfo(url="https://trading-bot-vpta.onrender.com/app"),
             )
         )
 
