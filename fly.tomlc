@@ -1,0 +1,10 @@
+app = "trading-bot-d-pngg"
+primary_region = "iad"
+
+[build]
+
+[processes]
+app = "python bot.py"
+[env]
+grep -n "fly.dev\|railway" bot.py
+
