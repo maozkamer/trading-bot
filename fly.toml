@@ -1,4 +1,4 @@
-app = "trading-bot"
+app = "trading-bot--e-2lg"
 primary_region = "iad"
 
 [build]
