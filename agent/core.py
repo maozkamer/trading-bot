@@ -13,7 +13,7 @@ from typing import Any
 
 import anthropic
 
-from agent.memory import init_memory_db, recall_memory
+from agent.memory import init_memory_db, recall_memory, save_message, get_history
 from agent.tools import TOOL_DEFINITIONS, TOOL_REGISTRY
 from agent.transparency import (
     conclusion_step,
@@ -85,7 +85,8 @@ def run_agent(user_message: str, chat_id: int | str) -> str:
     client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
     system_prompt = _inject_memory(user_message, _load_system_prompt())
 
-    messages: list[dict] = [{"role": "user", "content": user_message}]
+    save_message(chat_id, "user", user_message)
+    messages: list[dict] = get_history(chat_id, limit=10)
     final_text = ""
 
     for iteration in range(_MAX_ITERATIONS):
@@ -148,6 +149,8 @@ def run_agent(user_message: str, chat_id: int | str) -> str:
         log.warning("Agent hit MAX_ITERATIONS (%d)", _MAX_ITERATIONS)
         error_step(chat_id, f"הגעתי למקסימום איטרציות ({_MAX_ITERATIONS}).")
 
+    if final_text:
+        save_message(chat_id, "assistant", final_text)
     return final_text or "אין תוצאה."
 
 

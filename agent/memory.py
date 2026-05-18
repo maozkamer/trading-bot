@@ -47,6 +47,15 @@ def init_memory_db() -> None:
                 outcome        TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_symbol ON pattern_alerts(symbol);
+
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    TEXT NOT NULL,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_id ON conversation_history(chat_id);
         """)
     log.info("✅ Agent memory DB initialised at %s", DB_PATH)
 
@@ -138,6 +147,48 @@ def save_pattern_alert(
     except Exception as exc:
         log.error("save_pattern_alert failed: %s", exc)
         return False
+
+
+# ─────────────────────────────────────────────────────────────
+#  Conversation history
+# ─────────────────────────────────────────────────────────────
+
+def save_message(chat_id: int | str, role: str, content: str) -> None:
+    try:
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT INTO conversation_history (chat_id, role, content) VALUES (?,?,?)",
+                (str(chat_id), role, content),
+            )
+    except Exception as exc:
+        log.error("save_message failed: %s", exc)
+
+
+def get_history(chat_id: int | str, limit: int = 10) -> list[dict]:
+    """Return the last *limit* messages for a chat in chronological order."""
+    try:
+        with _get_conn() as conn:
+            rows = conn.execute(
+                "SELECT role, content FROM conversation_history "
+                "WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+                (str(chat_id), limit),
+            ).fetchall()
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    except Exception as exc:
+        log.error("get_history failed: %s", exc)
+        return []
+
+
+def clear_history(chat_id: int | str) -> None:
+    try:
+        with _get_conn() as conn:
+            conn.execute(
+                "DELETE FROM conversation_history WHERE chat_id=?",
+                (str(chat_id),),
+            )
+        log.info("🗑️ Conversation history cleared for chat %s", chat_id)
+    except Exception as exc:
+        log.error("clear_history failed: %s", exc)
 
 
 def was_alert_sent_recently(symbol: str, pattern: str, hours: int = 6) -> bool:

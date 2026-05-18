@@ -56,8 +56,8 @@ from database import (
     save_alert,
     save_setting,
 )
-from agent import run_agent, setup_scheduler
-from agent.memory import init_memory_db
+from agent import setup_scheduler
+from agent.memory import init_memory_db, clear_history
 
 # ─────────────────────────────────────────────────────────────
 #  Config
@@ -758,6 +758,12 @@ async def cmd_agent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"❌ שגיאה: {exc}")
 
 
+async def cmd_reset(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear this user's conversation history."""
+    clear_history(str(update.effective_chat.id))
+    await update.message.reply_text("היסטוריית השיחה נמחקה ✅")
+
+
 async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
 
@@ -1020,6 +1026,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("agent",    cmd_agent))
+    app.add_handler(CommandHandler("reset",    cmd_reset))
     app.add_handler(CommandHandler("menu",     cmd_menu))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("analysis", cmd_analysis))
