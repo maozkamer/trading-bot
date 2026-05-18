@@ -56,6 +56,8 @@ from database import (
     save_alert,
     save_setting,
 )
+from agent import run_agent, setup_scheduler
+from agent.memory import init_memory_db
 
 # ─────────────────────────────────────────────────────────────
 #  Config
@@ -734,6 +736,28 @@ _ACTION_PREFIX = {
 }
 
 
+async def cmd_agent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /agent <question> — runs the full AI agent loop."""
+    query = " ".join(ctx.args).strip() if ctx.args else ""
+    if not query:
+        await update.message.reply_text(
+            "שלח שאלה אחרי הפקודה, למשל:\n"
+            "/agent מה המצב הטכני של NNE?"
+        )
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("🤖 מפעיל Agent…")
+    try:
+        from agent.core import run_agent_async
+        result = await run_agent_async(query, chat_id)
+        # Agent sends transparency steps inline; send final answer too
+        if result and result != "אין תוצאה.":
+            await update.message.reply_text(f"💡 *תשובה סופית:*\n{result}", parse_mode="Markdown")
+    except Exception as exc:
+        log.error("cmd_agent error: %s", exc)
+        await update.message.reply_text(f"❌ שגיאה: {exc}")
+
+
 async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("תפריט:", reply_markup=MAIN_KEYBOARD)
 
@@ -983,6 +1007,7 @@ def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("agent",    cmd_agent))
     app.add_handler(CommandHandler("menu",     cmd_menu))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("analysis", cmd_analysis))
@@ -1021,6 +1046,13 @@ def main() -> None:
             log.info("✅ Global default menu button set to %s", WEB_APP_URL)
         except Exception as exc:
             log.error("❌ Global set_chat_menu_button failed: %s", exc)
+        # Initialise agent memory DB and start scheduled jobs
+        try:
+            init_memory_db()
+            setup_scheduler()
+            log.info("✅ Agent scheduler started")
+        except Exception as exc:
+            log.error("❌ Agent scheduler startup failed: %s", exc)
 
     app.post_init = post_init
 
