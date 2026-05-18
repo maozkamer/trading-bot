@@ -26,23 +26,11 @@ _STEP_ICONS = {
 
 
 def _send_sync(chat_id: int | str, text: str) -> None:
-    """Fire-and-forget sync HTTP POST to Telegram sendMessage."""
-    if not _TOKEN:
-        log.debug("transparency: no token, skipping send")
-        return
-    url = f"https://api.telegram.org/bot{_TOKEN}/sendMessage"
-    try:
-        httpx.post(
-            url,
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=8,
-        )
-    except Exception as exc:
-        log.debug("transparency send failed: %s", exc)
+    return
 
 
 async def _send_async(chat_id: int | str, text: str) -> None:
-    await asyncio.get_event_loop().run_in_executor(None, _send_sync, chat_id, text)
+    return
 
 
 def _format(icon: str, label: str, detail: str = "") -> str:

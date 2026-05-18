@@ -978,6 +978,18 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⏳ מושך Fear & Greed Index…")
         msg = await asyncio.get_event_loop().run_in_executor(None, build_fear_greed_message)
         await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        # Any free-text message → agent
+        chat_id = update.effective_chat.id
+        await update.message.reply_text("🤖 חושב…")
+        try:
+            from agent.core import run_agent_async
+            result = await run_agent_async(text, chat_id)
+            if result and result != "אין תוצאה.":
+                await update.message.reply_text(result, parse_mode="Markdown")
+        except Exception as exc:
+            log.error("handle_text agent error: %s", exc)
+            await update.message.reply_text(f"❌ שגיאה: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────
