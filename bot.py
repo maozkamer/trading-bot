@@ -62,9 +62,10 @@ from database import (
 # ─────────────────────────────────────────────────────────────
 #  Config
 # ─────────────────────────────────────────────────────────────
-TOKEN  = os.environ.get("TELEGRAM_TOKEN")
-EST_TZ = pytz.timezone("US/Eastern")
-PORT   = int(os.environ.get("PORT", 8080))
+TOKEN       = os.environ.get("TELEGRAM_TOKEN")
+EST_TZ      = pytz.timezone("US/Eastern")
+PORT        = int(os.environ.get("PORT", 8080))
+WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://trading-bot-d-pngg.fly.dev/app")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -502,6 +503,22 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     global OWNER_CHAT_ID
     OWNER_CHAT_ID = update.effective_chat.id
     save_setting("chat_id", str(OWNER_CHAT_ID))
+
+    # Force-update the per-chat menu button to the current fly.dev URL.
+    # This overrides any stale per-chat button left by a previous deployment
+    # (e.g. Railway). The global set_chat_menu_button (no chat_id) does NOT
+    # override per-chat buttons set by old deployments.
+    try:
+        await update.get_bot().set_chat_menu_button(
+            chat_id=OWNER_CHAT_ID,
+            menu_button=MenuButtonWebApp(
+                text="⚡ Live",
+                web_app=WebAppInfo(url=WEB_APP_URL),
+            ),
+        )
+        log.info("✅ Per-chat menu button → %s (chat %d)", WEB_APP_URL, OWNER_CHAT_ID)
+    except Exception as exc:
+        log.error("❌ set_chat_menu_button failed: %s", exc)
 
     symbols_str = " | ".join(_dynamic_watchlist)
     text = (
@@ -1040,12 +1057,19 @@ def main() -> None:
         server = uvicorn.Server(config)
         asyncio.create_task(server.serve())
         log.info("✅ FastAPI server started on port %d", PORT)
-        await application.bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="⚡ Live",
-                web_app=WebAppInfo(url="https://trading-bot-d-pngg.fly.dev/app"),
+        log.info("🌐 Web App URL: %s", WEB_APP_URL)
+        # Set global default menu button (does NOT override per-chat buttons).
+        # The per-chat button is updated in cmd_start when user sends /start.
+        try:
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="⚡ Live",
+                    web_app=WebAppInfo(url=WEB_APP_URL),
+                ),
             )
-        )
+            log.info("✅ Global default menu button set to %s", WEB_APP_URL)
+        except Exception as exc:
+            log.error("❌ Global set_chat_menu_button failed: %s", exc)
 
     app.post_init = post_init
 
