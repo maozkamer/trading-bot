@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for trading-bot-d-pngg on 2026-05-17T17:49:09Z
+# fly.toml app configuration file generated for trading-bot-d-pngg on 2026-05-18T10:58:20Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'trading-bot-d-pngg'
-primary_region = 'ams'
+primary_region = 'lhr'
 
 [build]
 
