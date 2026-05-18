@@ -39,8 +39,6 @@ from analysis import (
     get_fibonacci_levels,
     get_vwap,
     build_fear_greed_message,
-    build_setups_message,
-    get_active_setups,
     get_ichimoku,
     get_stoch_rsi,
     get_pivot_points,
@@ -454,69 +452,29 @@ async def earnings_loop(app: Application) -> None:
         await asyncio.sleep(61)
 
 
-async def setup_scan_loop(app: Application) -> None:
-    await asyncio.sleep(30)
-    while True:
-        try:
-            if OWNER_CHAT_ID is not None and not alerts_paused and is_market_hours():
-                sent = 0
-                for symbol in _dynamic_watchlist:
-                    try:
-                        setups = await asyncio.get_event_loop().run_in_executor(
-                            None, get_active_setups, symbol
-                        )
-                        for s in setups:
-                            key = f"setup_{symbol}_{s['name'].split()[0].lower()}"
-                            if is_alert_recent(symbol, key, 12):
-                                continue
-                            save_alert(symbol, key)
-                            dist_pct = (s["entry"] - s["price"]) / s["price"] * 100
-                            vol_note = f"גבוה x{s['vol_ratio']:.1f} — מחזק את הסט-אפ ⚡" if s["vol_ratio"] >= 1.5 else "תקין"
-                            text = (
-                                f"🚨 *סט-אפ מזוהה — {symbol}!*\n\n"
-                                f"📊 פטרן: {s['name']}\n"
-                                f"💵 מחיר נוכחי: ${s['price']:.2f}\n"
-                                f"🎯 נקודת פריצה: ${s['entry']:.2f} ({dist_pct:+.1f}%)\n"
-                                f"📈 יעד אחרי פריצה: ${s['target']:.2f}\n"
-                                f"🛑 סטופ מומלץ: ${s['stop']:.2f}\n"
-                                f"📊 נפח: {vol_note}\n\n"
-                                f"📌 סיבה: {s['reason']}"
-                            )
-                            await app.bot.send_message(
-                                chat_id=OWNER_CHAT_ID, text=text, parse_mode="Markdown"
-                            )
-                            sent += 1
-                            await asyncio.sleep(0.4)
-                        await asyncio.sleep(1.0)
-                    except Exception as exc:
-                        log.warning("setup_scan error %s: %s", symbol, exc)
-        except Exception as exc:
-            log.error("setup_scan_loop error: %s", exc)
-        await asyncio.sleep(3600)
-
 
 # ─────────────────────────────────────────────────────────────
 #  Command handlers
 # ─────────────────────────────────────────────────────────────
 
-async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     global OWNER_CHAT_ID
     OWNER_CHAT_ID = update.effective_chat.id
     save_setting("chat_id", str(OWNER_CHAT_ID))
 
-    # Force-update the per-chat menu button to the current fly.dev URL.
-    # This overrides any stale per-chat button left by a previous deployment
-    # (e.g. Railway). The global set_chat_menu_button (no chat_id) does NOT
-    # override per-chat buttons set by old deployments.
+    # Force-update the per-chat menu button.
+    # Must use ctx.bot (not update.get_bot()) — more reliable in PTB v20.
+    # Must pass chat_id explicitly — global default does NOT override
+    # per-chat buttons set by previous deployments (e.g. Railway).
     try:
-        await update.get_bot().set_chat_menu_button(
+        await ctx.bot.set_chat_menu_button(
             chat_id=OWNER_CHAT_ID,
             menu_button=MenuButtonWebApp(
                 text="⚡ Live",
                 web_app=WebAppInfo(url=WEB_APP_URL),
             ),
         )
-        log.info("✅ Per-chat menu button → %s (chat %d)", WEB_APP_URL, OWNER_CHAT_ID)
+        log.info("✅ Per-chat menu button updated → %s (chat %d)", WEB_APP_URL, OWNER_CHAT_ID)
     except Exception as exc:
         log.error("❌ set_chat_menu_button failed: %s", exc)
 
@@ -540,7 +498,6 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton("🎯 סט-אפים"),                                        ],
             [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
             [KeyboardButton("📐 פיבונאצ'י"),                                      ],
             [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
@@ -722,7 +679,6 @@ PENDING_KEY = "pending_action"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("🎯 סט-אפים"),                                        ],
         [KeyboardButton("📉 BB"),            KeyboardButton("⚡ VWAP")],
         [KeyboardButton("📐 פיבונאצ'י"),                                      ],
         [KeyboardButton("☁️ Ichimoku"),      KeyboardButton("📉 Stoch RSI"), KeyboardButton("📐 Pivot")],
@@ -760,7 +716,7 @@ def build_more_keyboard() -> InlineKeyboardMarkup:
     ])
 
 SYMBOL_ACTIONS = {
-    "📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🎯 סט-אפים", "🔎 ניתוח",
+    "📊 גרף", "📐 פיבונאצ'י", "📉 BB", "⚡ VWAP", "🔎 ניתוח",
     "☁️ Ichimoku", "📉 Stoch RSI", "📐 Pivot", "💹 OBV", "🛑 Stop Loss",
 }
 
@@ -769,7 +725,6 @@ _ACTION_PREFIX = {
     "📐 פיבונאצ'י":  "fib",
     "📉 BB":          "bb",
     "⚡ VWAP":        "vwap",
-    "🎯 סט-אפים":    "setups",
     "🔎 ניתוח":      "richanalysis",
     "☁️ Ichimoku":   "ichimoku",
     "📉 Stoch RSI":  "stoch",
@@ -842,10 +797,6 @@ async def _run_symbol_action(action: str, symbol: str, msg,
     elif action == "analysis":
         await msg.reply_text(f"⏳ מנתח את {symbol}…")
         await msg.reply_text(get_full_analysis(symbol), parse_mode="Markdown")
-    elif action == "setups":
-        await msg.reply_text(f"⏳ מחפש סט-אפים עבור {symbol}…")
-        result = await asyncio.get_event_loop().run_in_executor(None, build_setups_message, symbol)
-        await msg.reply_text(result, parse_mode="Markdown")
     elif action == "richanalysis":
         await msg.reply_text(f"⏳ מנתח את {symbol}…")
         result = await asyncio.get_event_loop().run_in_executor(None, get_rich_analysis, symbol)
@@ -890,7 +841,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     prefix, _, payload = data.partition(":")
 
     if prefix in ("chart", "fib", "bb", "vwap", "levels", "analysis",
-                  "setups", "richanalysis",
+                  "richanalysis",
                   "ichimoku", "stoch", "pivot", "obv", "atr", "stoploss"):
         await _run_symbol_action(prefix, payload, query.message, ctx)
 
