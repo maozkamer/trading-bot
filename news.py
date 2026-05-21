@@ -10,14 +10,6 @@ from datetime import date, datetime, timedelta
 
 import feedparser
 import requests
-from deep_translator import GoogleTranslator
-
-
-def _translate(text: str) -> str:
-    try:
-        return GoogleTranslator(source="auto", target="iw").translate(text)
-    except Exception:
-        return text
 
 from analysis import WATCHLIST, _fetch_daily, _rsi, _find_sr, fetch_fear_greed, get_top_morning_pick
 
@@ -25,6 +17,10 @@ log = logging.getLogger(__name__)
 
 FMP_KEY      = os.environ.get("FMP_KEY")
 FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL   = "llama-3.1-8b-instant"
 
 # ─────────────────────────────────────────────────────────────
 #  RSS feeds (no API key needed)
@@ -65,6 +61,41 @@ def fetch_news() -> tuple[list[str], list[str]]:
     return headlines[:15], mentioned
 
 
+def _groq_summarize(headlines: list[str], watchlist_symbols: list[str]) -> str:
+    """Summarise headlines in Hebrew using Groq. Falls back to raw headlines."""
+    if not GROQ_API_KEY or not headlines:
+        return "\n".join(f"  - {h}" for h in headlines[:5])
+
+    headlines_text = "\n".join(f"- {h}" for h in headlines[:15])
+    symbols_text   = ", ".join(watchlist_symbols)
+    prompt = (
+        f"אתה עוזר מסחר. קיבלת את הכותרות האלה:\n{headlines_text}\n\n"
+        f"המניות שהטריידר עוקב: {symbols_text}\n"
+        f"תן סיכום של 3-4 נקודות בעברית קצרות וחדות — מה חשוב לטריידר הבוקר, "
+        f"האם יש השפעה על המניות ברשימה, ומה כדאי לעקוב."
+    )
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 400,
+                "temperature": 0.3,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        log.warning("Groq summarize failed: %s", exc)
+        return "\n".join(f"  - {h}" for h in headlines[:5])
+
+
 def build_morning_message() -> str:
     from datetime import date as _date
     today_str = _date.today().strftime("%d/%m/%Y")
@@ -83,8 +114,7 @@ def build_morning_message() -> str:
     # Top 3 headlines in Hebrew
     lines.append("📰 *חדשות מרכזיות:*")
     if headlines:
-        for h in headlines[:3]:
-            lines.append(f"  - {_translate(h)}")
+        lines.append(_groq_summarize(headlines, WATCHLIST))
     else:
         lines.append("  לא הצלחתי לשלוף חדשות כרגע.")
 
