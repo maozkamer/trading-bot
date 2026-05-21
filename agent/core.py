@@ -26,8 +26,8 @@ from agent.transparency import (
 log = logging.getLogger(__name__)
 
 _ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
-_MODEL = "claude-opus-4-5"
-_MAX_ITERATIONS = 15
+_MODEL = "claude-haiku-4-5-20251001"
+_MAX_ITERATIONS = 10
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent / "agent_prompts" / "system.md"
 
@@ -94,7 +94,7 @@ def run_agent(user_message: str, chat_id: int | str) -> str:
         try:
             response = client.messages.create(
                 model=_MODEL,
-                max_tokens=4096,
+                max_tokens=2048,
                 system=system_prompt,
                 tools=TOOL_DEFINITIONS,
                 messages=messages,
