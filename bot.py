@@ -27,6 +27,7 @@ import hmac
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 
 import discord
@@ -915,6 +916,33 @@ async def _handle_healthz(_request: web.Request) -> web.Response:
     )
 
 
+# The morning briefing hits Twelve Data / Groq / news feeds, so it is built once per day
+# and cached: the 09:00 post and the assistant's /brief pull share the same text.
+_morning_cache: dict = {"date": None, "text": None}
+_morning_lock = threading.Lock()  # the build takes ~2 min; a second caller must wait, not rebuild
+
+
+def _cached_morning_message() -> str:
+    today = datetime.now(TZ).date()
+    with _morning_lock:
+        if _morning_cache["date"] != today:
+            _morning_cache["text"] = build_morning_message()
+            _morning_cache["date"] = today
+        return _morning_cache["text"]
+
+
+async def _handle_brief(request: web.Request) -> web.Response:
+    supplied = request.headers.get("X-Auth-Token", "")
+    if not AGENT_LINK_TOKEN or not hmac.compare_digest(supplied, AGENT_LINK_TOKEN):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        text = await asyncio.to_thread(_cached_morning_message)
+    except Exception as exc:
+        log.error("/brief failed: %s", exc, exc_info=True)
+        return web.json_response({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+    return web.json_response({"text": text, "date": str(_morning_cache["date"])})
+
+
 async def _handle_ask(request: web.Request) -> web.Response:
     supplied = request.headers.get("X-Auth-Token", "")
     if not AGENT_LINK_TOKEN or not hmac.compare_digest(supplied, AGENT_LINK_TOKEN):
@@ -947,6 +975,7 @@ async def start_agent_link_server() -> None:
         return
     app = web.Application()
     app.router.add_get("/healthz", _handle_healthz)
+    app.router.add_get("/brief", _handle_brief)
     app.router.add_post("/ask", _handle_ask)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -992,7 +1021,7 @@ async def on_ready() -> None:
         log.error("setup_scheduler failed: %s", exc, exc_info=True)
 
     client.loop.create_task(scan_loop())
-    client.loop.create_task(_daily_loop(9, 0, build_morning_message, "morning briefing"))
+    client.loop.create_task(_daily_loop(9, 0, _cached_morning_message, "morning briefing"))
     client.loop.create_task(_daily_loop(9, 30, build_screener_message, "screener"))
     client.loop.create_task(earnings_loop())
 
