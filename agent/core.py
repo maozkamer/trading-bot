@@ -170,34 +170,54 @@ async def run_agent_async(user_message: str, chat_id: int | str) -> str:
 #  needed to phrase the result, not to decide which tool to call.
 # ─────────────────────────────────────────────────────────────
 
-def run_agent_single_shot(context: dict, instruction: str, max_tokens: int = 500) -> str:
+def run_agent_single_shot(
+    context: dict,
+    instruction: str,
+    max_tokens: int = 500,
+    system: str | None = None,
+    model: str | None = None,
+) -> str:
     """
     Single Claude API call: system prompt + instruction + context as JSON.
     No tools, no conversation history. Returns the response text.
+
+    *system* overrides the default agent system prompt (used by "הממליץ",
+    which needs a judge persona rather than the generic analyst one).
+    *model* overrides the default model; on failure the caller can retry
+    without it to fall back to _MODEL.
     """
     if not _ANTHROPIC_KEY:
         return "❌ ANTHROPIC_API_KEY לא מוגדר."
 
     client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
-    system_prompt = _load_system_prompt()
+    system_prompt = system or _load_system_prompt()
     user_content = f"{instruction}\n\n{json.dumps(context, ensure_ascii=False, default=str)}"
 
     try:
         response = client.messages.create(
-            model=_MODEL,
+            model=model or _MODEL,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
     except Exception as exc:
-        log.error("run_agent_single_shot API error: %s", exc)
+        log.error("run_agent_single_shot API error (model=%s): %s", model or _MODEL, exc)
         return f"❌ שגיאת API: {exc}"
 
     text_parts = [block.text for block in response.content if block.type == "text"]
     return "\n".join(text_parts).strip()
 
 
-async def run_agent_single_shot_async(context: dict, instruction: str, max_tokens: int = 500) -> str:
+async def run_agent_single_shot_async(
+    context: dict,
+    instruction: str,
+    max_tokens: int = 500,
+    system: str | None = None,
+    model: str | None = None,
+) -> str:
     """Run run_agent_single_shot in a thread so it doesn't block the event loop."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, run_agent_single_shot, context, instruction, max_tokens)
+    return await loop.run_in_executor(
+        None,
+        lambda: run_agent_single_shot(context, instruction, max_tokens, system, model),
+    )

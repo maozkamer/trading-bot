@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
 from dataclasses import dataclass
 from typing import Optional
 
@@ -48,7 +49,7 @@ def _api_symbol(symbol: str) -> str:
     return symbol.replace("-USD", "/USD") if symbol.endswith("-USD") else symbol
 
 
-def _fetch_daily(symbol: str, outputsize: int = 60) -> pd.DataFrame:
+def _fetch_daily(symbol: str, outputsize: int = 60, force: bool = False) -> pd.DataFrame:
     """
     Fetch OHLCV data for *symbol* via Twelve Data.
     outputsize: number of bars to fetch (default 60; use 120 for Ichimoku).
@@ -69,7 +70,7 @@ def _fetch_daily(symbol: str, outputsize: int = 60) -> pd.DataFrame:
 
     _ck = f"{symbol}:{outputsize}"
     now = time.monotonic()
-    if _ck in _CACHE:
+    if _ck in _CACHE and not force:
         ts, df = _CACHE[_ck]
         if now - ts < _CACHE_TTL:
             return df
@@ -120,10 +121,66 @@ def _fetch_daily(symbol: str, outputsize: int = 60) -> pd.DataFrame:
             last_exc = exc
             log.warning("_fetch_daily %s attempt %d/%d failed: %s",
                         symbol, attempt, _RETRY_COUNT, exc)
+            # On a rate-limit, don't burn the full retry budget — Yahoo is waiting.
+            if "429" in str(exc) or "Too Many Requests" in str(exc):
+                break
             if attempt < _RETRY_COUNT:
                 time.sleep(_RETRY_WAIT)
 
+    # Twelve Data exhausted (usually the free-tier 8 req/min limit) — fall back to Yahoo.
+    fallback = _fetch_daily_yahoo(symbol, outputsize)
+    if fallback is not None and not fallback.empty:
+        log.info("_fetch_daily %s: served from Yahoo fallback (%d bars)", symbol, len(fallback))
+        _CACHE[_ck] = (time.monotonic(), fallback)
+        return fallback
+
     raise last_exc
+
+
+def _fetch_daily_yahoo(symbol: str, outputsize: int = 60) -> "pd.DataFrame | None":
+    """
+    Fallback daily OHLCV via yfinance (no API key, no per-minute cap).
+    Yahoo uses the same 'BTC-USD' suffix we already carry, so no symbol rewrite.
+    Returns the same column shape as _fetch_daily, or None on failure.
+    """
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        log.warning("yfinance not available: %s", exc)
+        return None
+
+    period = "2y" if outputsize > 250 else "1y" if outputsize > 120 else "6mo"
+    try:
+        # yfinance's own timeout=10 default isn't always honored by the underlying
+        # curl_cffi session (seen hanging 60s+) — enforce a hard wall-clock cap
+        # ourselves so one bad symbol can't stall a whole scan. Don't wait for the
+        # stray thread on timeout (shutdown(wait=False)) — it dies on its own.
+        pool = ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(
+            yf.download, symbol, period=period, interval="1d",
+            auto_adjust=False, progress=False, threads=False, timeout=8,
+        )
+        try:
+            raw = fut.result(timeout=12)
+        except _FutureTimeout:
+            log.warning("_fetch_daily_yahoo %s timed out after 12s", symbol)
+            pool.shutdown(wait=False)
+            return None
+        pool.shutdown(wait=False)
+        if raw is None or raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        df = raw.rename(columns={
+            "Open": "Open", "High": "High", "Low": "Low",
+            "Close": "Close", "Volume": "Volume",
+        })[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+        df.index = pd.to_datetime(df.index)
+        df.index.name = "Date"
+        return df.sort_index().tail(outputsize)
+    except Exception as exc:
+        log.warning("_fetch_daily_yahoo %s failed: %s", symbol, exc)
+        return None
 
 WATCHLIST = [
     "NNE", "MARA", "PLTR", "IREN", "SOFI", "AAPL", "NVDA", "TSLA",

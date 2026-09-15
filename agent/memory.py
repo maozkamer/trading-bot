@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -56,6 +56,33 @@ def init_memory_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_chat_id ON conversation_history(chat_id);
+
+            CREATE TABLE IF NOT EXISTS recommendations (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol       TEXT    NOT NULL,
+                setup        TEXT,
+                direction    TEXT    NOT NULL DEFAULT 'long',
+                confidence   REAL,
+                det_score    REAL,
+                entry        REAL    NOT NULL,
+                target       REAL    NOT NULL,
+                stop         REAL    NOT NULL,
+                rr           REAL,
+                reasoning    TEXT,
+                risks        TEXT,
+                snapshot     TEXT,
+                status       TEXT    NOT NULL DEFAULT 'open',
+                opened_at    TEXT    NOT NULL,
+                deadline_at  TEXT,
+                closed_at    TEXT,
+                close_price  REAL,
+                close_reason TEXT,
+                pnl_pct      REAL,
+                mfe_pct      REAL,
+                mae_pct      REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rec_status ON recommendations(status);
+            CREATE INDEX IF NOT EXISTS idx_rec_symbol ON recommendations(symbol);
         """)
     log.info("✅ Agent memory DB initialised at %s", DB_PATH)
 
@@ -189,6 +216,131 @@ def clear_history(chat_id: int | str) -> None:
         log.info("🗑️ Conversation history cleared for chat %s", chat_id)
     except Exception as exc:
         log.error("clear_history failed: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────
+#  "הממליץ" recommendations
+# ─────────────────────────────────────────────────────────────
+
+def save_recommendation(rec: dict) -> int:
+    """Persist an accepted recommendation. Returns the new row id."""
+    now = datetime.now(timezone.utc)
+    deadline = now + timedelta(days=int(rec.get("hold_days", 14)))
+    with _get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO recommendations
+                 (symbol, setup, direction, confidence, det_score, entry, target, stop, rr,
+                  reasoning, risks, snapshot, status, opened_at, deadline_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?, ?)""",
+            (
+                rec["symbol"], rec.get("setup", ""), rec.get("direction", "long"),
+                rec.get("confidence"), rec.get("det_score"),
+                rec["entry"], rec["target"], rec["stop"], rec.get("rr"),
+                rec.get("reasoning", ""), rec.get("risks", ""), rec.get("snapshot", ""),
+                now.isoformat(), deadline.isoformat(),
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_open_recommendations() -> list[dict]:
+    with _get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recommendations WHERE status='open' ORDER BY opened_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_recommendation_excursions(rec_id: int, mfe_pct: float, mae_pct: float) -> None:
+    try:
+        with _get_conn() as conn:
+            conn.execute(
+                "UPDATE recommendations SET mfe_pct=?, mae_pct=? WHERE id=?",
+                (mfe_pct, mae_pct, rec_id),
+            )
+    except Exception as exc:
+        log.error("update_recommendation_excursions failed: %s", exc)
+
+
+def close_recommendation(
+    rec_id: int,
+    status: str,
+    close_price: float,
+    close_reason: str,
+    pnl_pct: float,
+    mfe_pct: float,
+    mae_pct: float,
+) -> None:
+    try:
+        with _get_conn() as conn:
+            conn.execute(
+                """UPDATE recommendations
+                     SET status=?, close_price=?, close_reason=?, pnl_pct=?,
+                         mfe_pct=?, mae_pct=?, closed_at=?
+                   WHERE id=?""",
+                (
+                    status, close_price, close_reason, pnl_pct, mfe_pct, mae_pct,
+                    datetime.now(timezone.utc).isoformat(), rec_id,
+                ),
+            )
+        log.info("הממליץ: closed #%s as %s (%.2f%%)", rec_id, status, pnl_pct)
+    except Exception as exc:
+        log.error("close_recommendation failed: %s", exc)
+
+
+def was_symbol_recommended_recently(symbol: str, hours: int = 72) -> bool:
+    """True if *symbol* has an open recommendation or was opened within *hours*."""
+    try:
+        with _get_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM recommendations "
+                "WHERE symbol=? AND (status='open' OR opened_at > datetime('now', ?)) LIMIT 1",
+                (symbol, f"-{hours} hours"),
+            ).fetchone()
+        return row is not None
+    except Exception as exc:
+        log.error("was_symbol_recommended_recently failed: %s", exc)
+        return False
+
+
+def get_recommendation_stats(since_days: int | None = None) -> dict:
+    with _get_conn() as conn:
+        q = "SELECT * FROM recommendations WHERE status != 'open'"
+        params: list = []
+        if since_days:
+            q += " AND closed_at > datetime('now', ?)"
+            params.append(f"-{int(since_days)} days")
+        rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+        open_count = conn.execute(
+            "SELECT COUNT(*) FROM recommendations WHERE status='open'"
+        ).fetchone()[0]
+
+    closed = len(rows)
+    wins = sum(1 for r in rows if (r.get("pnl_pct") or 0) > 0)
+    losses = closed - wins
+    avg_pnl = round(sum((r.get("pnl_pct") or 0) for r in rows) / closed, 2) if closed else None
+    win_rate = round(wins / closed * 100, 1) if closed else None
+    best = max(rows, key=lambda r: r.get("pnl_pct") or -1e9, default=None)
+    worst = min(rows, key=lambda r: r.get("pnl_pct") or 1e9, default=None)
+    by_status: dict[str, int] = {}
+    for r in rows:
+        by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+
+    return {
+        "closed": closed,
+        "open": open_count,
+        "wins": wins,
+        "losses": losses,
+        "avg_pnl": avg_pnl,
+        "win_rate": win_rate,
+        "by_status": by_status,
+        "best": {"symbol": best["symbol"], "pnl_pct": best["pnl_pct"]}
+        if best and best.get("pnl_pct") is not None
+        else None,
+        "worst": {"symbol": worst["symbol"], "pnl_pct": worst["pnl_pct"]}
+        if worst and worst.get("pnl_pct") is not None
+        else None,
+    }
 
 
 def was_alert_sent_recently(symbol: str, pattern: str, hours: int = 6) -> bool:

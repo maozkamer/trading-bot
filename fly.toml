@@ -4,16 +4,19 @@ primary_region = "lhr"
 [build]
   dockerfile = "Dockerfile"
 
-[http_service]
-  auto_start_machines = true
-  auto_stop_machines = "off"
-  force_https = true
-  internal_port = 8080
-  min_machines_running = 1
-  processes = ["app"]
 
 [processes]
   app = "python bot.py"
+
+# The personal-assistant bot reaches this agent over HTTP (/ask, /healthz).
+# The Discord gateway client is long-lived, so never auto-stop for lack of traffic.
+[http_service]
+  processes = ["app"]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
 
 [[vm]]
   cpu_kind = "shared"

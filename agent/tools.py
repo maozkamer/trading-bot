@@ -406,6 +406,36 @@ def send_telegram(message: str, chat_id: str | None = None) -> dict:
 #  Tool registry — used by core.py to build Claude tool defs
 # ─────────────────────────────────────────────────────────────
 
+def get_quote(symbol: str) -> dict:
+    """
+    Real-time last price for *symbol* (Twelve Data /quote, 60s micro-cache).
+    Use this — not analyze_stock — whenever the question is about the price
+    right now: analyze_stock reads the last daily bar and is cached ~55 min.
+    """
+    try:
+        from agent.market_data import get_quote as _gq
+
+        return _gq(symbol)
+    except Exception as exc:
+        log.error("get_quote %s: %s", symbol, exc)
+        return {"symbol": symbol, "error": str(exc)}
+
+
+def gap_report(symbol: str) -> dict:
+    """
+    Overnight-gap picture for *symbol*: gap %, size in ATRs, heuristic type
+    (breakaway / runaway / exhaustion / common), whether it filled, and any
+    still-open gap zones acting as support/resistance.
+    """
+    try:
+        from agent.market_data import analyze_gap
+
+        return analyze_gap(symbol=symbol)
+    except Exception as exc:
+        log.error("gap_report %s: %s", symbol, exc)
+        return {"symbol": symbol, "error": str(exc)}
+
+
 TOOL_REGISTRY: dict[str, callable] = {
     "analyze_stock":      analyze_stock,
     "scan_universe":      scan_universe,
@@ -413,6 +443,8 @@ TOOL_REGISTRY: dict[str, callable] = {
     "fetch_news":         fetch_news,
     "check_earnings":     check_earnings,
     "get_market_overview": get_market_overview,
+    "get_quote":          get_quote,
+    "gap_report":         gap_report,
     "save_insight":       save_insight,
     "recall_memory":      recall_memory,
     "send_telegram":      send_telegram,
@@ -472,6 +504,30 @@ TOOL_DEFINITIONS = [
         "name": "get_market_overview",
         "description": "מצב השוק הכללי: SPY, QQQ, VIX — מחיר ושינוי יומי.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_quote",
+        "description": (
+            "מחיר אחרון בזמן אמת למנייה (מטמון של 60 שניות בלבד). "
+            "השתמש בזה — לא ב-analyze_stock — לכל שאלה על המחיר *עכשיו*."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string", "description": "סימול המנייה"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "gap_report",
+        "description": (
+            "ניתוח גאפ למנייה: גודל הגאפ ב-% וב-ATR, סוג (breakaway/runaway/"
+            "exhaustion/common), האם נסגר, ואזורי גאפ פתוחים שמשמשים תמיכה/התנגדות."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string", "description": "סימול המנייה"}},
+            "required": ["symbol"],
+        },
     },
     {
         "name": "save_insight",
