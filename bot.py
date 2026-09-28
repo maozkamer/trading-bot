@@ -8,7 +8,7 @@ only the presentation/handler layer is Discord-native.
 Structure on the server (created by /setup):
   📈 מסחר
     #התראות     — automated scan alerts
-    #בוקר       — morning briefing, screener, earnings
+    #בוקר       — morning briefing, earnings
     #ניתוח      — commands, plain-text tickers, and the pinned control panel
 
 Data is pulled per-symbol on demand only. There is deliberately no bulk
@@ -35,7 +35,7 @@ import pytz
 from aiohttp import web
 from discord import app_commands
 
-from news import build_morning_message, build_earnings_messages, build_screener_message
+from news import build_morning_message, build_earnings_messages
 from analysis import (
     WATCHLIST,
     Alert,
@@ -298,15 +298,6 @@ class PanelView(discord.ui.View):
     async def morning(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.defer(thinking=True)
         text = await asyncio.to_thread(build_morning_message)
-        await followup_long(interaction, text)
-
-    @discord.ui.button(
-        label="סקרינר", emoji="🔍",
-        style=discord.ButtonStyle.secondary, custom_id="panel:screener", row=1,
-    )
-    async def screener(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.defer(thinking=True)
-        text = await asyncio.to_thread(build_screener_message)
         await followup_long(interaction, text)
 
 
@@ -593,7 +584,7 @@ CHANNEL_HEADERS = {
     ),
     CH_MORNING: (
         "🌅 **ערוץ הבוקר**\n"
-        "תדריך בוקר ב-09:00 · סקרינר ב-09:30 · דוחות ב-08:30.\n"
+        "תדריך בוקר ב-09:00 · דוחות ב-08:30.\n"
         "הכל אוטומטי — אתה רק קורא."
     ),
     CH_RECOMMENDER: (
@@ -1022,7 +1013,6 @@ async def on_ready() -> None:
 
     client.loop.create_task(scan_loop())
     client.loop.create_task(_daily_loop(9, 0, _cached_morning_message, "morning briefing"))
-    client.loop.create_task(_daily_loop(9, 30, build_screener_message, "screener"))
     client.loop.create_task(earnings_loop())
 
     try:
