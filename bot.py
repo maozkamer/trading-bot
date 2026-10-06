@@ -8,7 +8,6 @@ only the presentation/handler layer is Discord-native.
 Structure on the server (created by /setup):
   📈 מסחר
     #התראות     — automated scan alerts
-    #בוקר       — morning briefing, earnings
     #ניתוח      — commands, plain-text tickers, and the pinned control panel
 
 Data is pulled per-symbol on demand only. There is deliberately no bulk
@@ -27,15 +26,13 @@ import hmac
 import logging
 import os
 import re
-import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import discord
 import pytz
 from aiohttp import web
 from discord import app_commands
 
-from news import build_morning_message, build_earnings_messages
 from analysis import (
     WATCHLIST,
     Alert,
@@ -97,7 +94,6 @@ _dynamic_watchlist: list[str] = list(WATCHLIST)
 CATEGORY_TRADING = "📈 מסחר"
 CATEGORY_ASSISTANT = "🤖 עוזר אישי"
 CH_ALERTS = "התראות"
-CH_MORNING = "בוקר"
 CH_ANALYSIS = "ניתוח"
 CH_RECOMMENDER = "הממליץ"
 CH_ASSISTANT = "עוזר-אישי"
@@ -291,15 +287,6 @@ class PanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(TickerSelect())
 
-    @discord.ui.button(
-        label="תדריך בוקר", emoji="🌅",
-        style=discord.ButtonStyle.secondary, custom_id="panel:morning", row=1,
-    )
-    async def morning(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await interaction.response.defer(thinking=True)
-        text = await asyncio.to_thread(build_morning_message)
-        await followup_long(interaction, text)
-
 
 async def _build_chart_file(symbol: str) -> tuple[discord.File | None, str]:
     try:
@@ -350,7 +337,7 @@ async def cmd_setup(interaction: discord.Interaction) -> None:
 
     try:
         trading = await ensure_category(CATEGORY_TRADING)
-        for ch_name in (CH_ALERTS, CH_MORNING, CH_ANALYSIS, CH_RECOMMENDER):
+        for ch_name in (CH_ALERTS, CH_ANALYSIS, CH_RECOMMENDER):
             await ensure_channel(trading, ch_name)
 
         assistant_cat = await ensure_category(CATEGORY_ASSISTANT)
@@ -582,11 +569,6 @@ CHANNEL_HEADERS = {
         "כאן יגיעו התראות אוטומטיות מסריקת המניות.\n"
         "כרגע ההתראות **כבויות** — `/alerts on` בערוץ הניתוח יפעיל אותן."
     ),
-    CH_MORNING: (
-        "🌅 **ערוץ הבוקר**\n"
-        "תדריך בוקר ב-09:00 · דוחות ב-08:30.\n"
-        "הכל אוטומטי — אתה רק קורא."
-    ),
     CH_RECOMMENDER: (
         "📈 **הממליץ**\n"
         "סריקה יומית אחרי סגירת השוק (07:00). ממליץ לונג רק על סטאפ שעובר "
@@ -798,50 +780,6 @@ async def scan_loop() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Daily pushes → #בוקר
-# ─────────────────────────────────────────────────────────────
-
-def _seconds_until(hour: int, minute: int, tz=TZ) -> float:
-    now = datetime.now(tz)
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
-async def _daily_loop(hour: int, minute: int, builder, label: str) -> None:
-    await client.wait_until_ready()
-    while True:
-        await asyncio.sleep(_seconds_until(hour, minute))
-        try:
-            msg = await asyncio.to_thread(builder)
-            await _post(CH_MORNING, msg)
-            log.info("%s posted", label)
-        except Exception as exc:
-            log.error("%s failed: %s", label, exc)
-        await asyncio.sleep(61)
-
-
-async def earnings_loop() -> None:
-    await client.wait_until_ready()
-    while True:
-        await asyncio.sleep(_seconds_until(8, 30))
-        try:
-            messages = await asyncio.to_thread(build_earnings_messages)
-            for msg in messages:
-                symbol = msg.split("*")[1] if "*" in msg else "earnings"
-                key = f"earnings_{symbol}_{datetime.now().strftime('%Y%m%d')}"
-                if is_alert_recent(symbol, key, 24):
-                    continue
-                save_alert(symbol, key)
-                await _post(CH_MORNING, msg)
-                await asyncio.sleep(0.4)
-        except Exception as exc:
-            log.error("earnings_loop error: %s", exc)
-        await asyncio.sleep(61)
-
-
-# ─────────────────────────────────────────────────────────────
 #  Agent push sink — the scheduler jobs call agent.tools.send_telegram
 # ─────────────────────────────────────────────────────────────
 
@@ -854,9 +792,9 @@ def _install_agent_sink() -> None:
     def discord_sink(message: str, chat_id: str | None = None) -> dict:
         try:
             asyncio.run_coroutine_threadsafe(
-                _post(CH_MORNING, message), client.loop
+                _post(CH_ALERTS, message), client.loop
             )
-            return {"sent": True, "channel": CH_MORNING}
+            return {"sent": True, "channel": CH_ALERTS}
         except Exception as exc:
             log.error("discord_sink failed: %s", exc)
             return {"sent": False, "error": str(exc)}
@@ -907,32 +845,6 @@ async def _handle_healthz(_request: web.Request) -> web.Response:
     )
 
 
-# The morning briefing hits Twelve Data / Groq / news feeds, so it is built once per day
-# and cached: the 09:00 post and the assistant's /brief pull share the same text.
-_morning_cache: dict = {"date": None, "text": None}
-_morning_lock = threading.Lock()  # the build takes ~2 min; a second caller must wait, not rebuild
-
-
-def _cached_morning_message() -> str:
-    today = datetime.now(TZ).date()
-    with _morning_lock:
-        if _morning_cache["date"] != today:
-            _morning_cache["text"] = build_morning_message()
-            _morning_cache["date"] = today
-        return _morning_cache["text"]
-
-
-async def _handle_brief(request: web.Request) -> web.Response:
-    supplied = request.headers.get("X-Auth-Token", "")
-    if not AGENT_LINK_TOKEN or not hmac.compare_digest(supplied, AGENT_LINK_TOKEN):
-        return web.json_response({"error": "unauthorized"}, status=401)
-    try:
-        text = await asyncio.to_thread(_cached_morning_message)
-    except Exception as exc:
-        log.error("/brief failed: %s", exc, exc_info=True)
-        return web.json_response({"error": f"{type(exc).__name__}: {exc}"}, status=500)
-    return web.json_response({"text": text, "date": str(_morning_cache["date"])})
-
 
 async def _handle_ask(request: web.Request) -> web.Response:
     supplied = request.headers.get("X-Auth-Token", "")
@@ -966,7 +878,6 @@ async def start_agent_link_server() -> None:
         return
     app = web.Application()
     app.router.add_get("/healthz", _handle_healthz)
-    app.router.add_get("/brief", _handle_brief)
     app.router.add_post("/ask", _handle_ask)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -1012,8 +923,6 @@ async def on_ready() -> None:
         log.error("setup_scheduler failed: %s", exc, exc_info=True)
 
     client.loop.create_task(scan_loop())
-    client.loop.create_task(_daily_loop(9, 0, _cached_morning_message, "morning briefing"))
-    client.loop.create_task(earnings_loop())
 
     try:
         await start_agent_link_server()
